@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>GATT Configurator v2.0.0 — Zephyr RTOS</title>
+<link rel="stylesheet" href="css/styles.css"/>
+</head>
+<body>
+
+<!-- TOPBAR -->
+<div class="topbar">
+  <div class="topbar-left">
+    <div class="topbar-logo">
+      <span style="font-family:var(--sans);font-size:15px;font-weight:700;color:var(--amber);letter-spacing:0.03em;display:block;">GATT Configurator</span>
+    </div>
+    <div class="topbar-badge">Zephyr RTOS</div>
+    <div class="topbar-badge" style="border-color:var(--green-dim);background:rgba(46,204,113,0.08);color:var(--green);">v2.0.0</div>
+  </div>
+  <div class="topbar-right">
+    <button class="btn btn-ghost" onclick="importXML()">⬆ Load XML</button>
+    <button class="btn btn-ghost" id="themeToggle" onclick="toggleTheme()" title="Toggle light/dark theme">🌙</button>
+    <button class="btn btn-success" onclick="generateAll()">⚡ Generate Code</button>
+  </div>
+</div>
+
+<div style="display:grid; grid-template-rows: 1fr auto; height: calc(100vh - 52px);">
+<div class="layout">
+
+  <!-- SIDEBAR -->
+  <div class="sidebar">
+    <div class="profile-card">
+      <div class="profile-card-header">
+        Profile
+        <span class="profile-freeze-btn" id="profileFreezeBtn"
+          onclick="toggleProfileFreeze()" title="Freeze / unfreeze profile settings">🔓</span>
+      </div>
+      <div class="profile-card-body" id="profileCardBody">
+        <div class="profile-row" style="margin-bottom:4px;">
+          <span class="profile-row-label">Domains</span>
+        </div>
+        <div id="domain-list"></div>
+        <div class="add-svc-btn" style="margin:2px 0 4px;" onclick="addDomain()">+ Add Domain</div>
+        <div class="profile-row" style="margin-top:4px;">
+          <span class="profile-row-label">Base UUID (96-bit suffix)</span>
+          <span class="profile-row-value" id="buuid-full">xxxxxxxx-XXXX-XXXX-XXXX-XXXXXXXXXXXX</span>
+        </div>
+        <div class="buuid-inputs">
+          <div class="buuid-field">
+            <span class="buuid-part-label">Bits 95–80</span>
+            <input class="buuid-input" id="buuid-p2" maxlength="4" value=""
+              oninput="updateBaseUUID('p2',this.value)" placeholder="XXXX"/>
+          </div>
+          <span class="buuid-sep">–</span>
+          <div class="buuid-field">
+            <span class="buuid-part-label">Bits 79–64</span>
+            <input class="buuid-input" id="buuid-p3" maxlength="4" value=""
+              oninput="updateBaseUUID('p3',this.value)" placeholder="XXXX"/>
+          </div>
+          <span class="buuid-sep">–</span>
+          <div class="buuid-field">
+            <span class="buuid-part-label">Bits 63–48</span>
+            <input class="buuid-input" id="buuid-p4" maxlength="4" value=""
+              oninput="updateBaseUUID('p4',this.value)" placeholder="XXXX"/>
+          </div>
+          <span class="buuid-sep">–</span>
+          <div class="buuid-field">
+            <span class="buuid-part-label">Bits 47–0</span>
+            <input class="buuid-input" id="buuid-p5" maxlength="12" value=""
+              oninput="updateBaseUUID('p5',this.value)" placeholder="XXXXXXXXXXXX"/>
+          </div>
+        </div>
+        <div class="profile-row" style="margin-top:6px;">
+          <span class="profile-row-label">Project</span>
+        </div>
+        <input class="buuid-input" id="profile-project" maxlength="80" value=""
+          style="width:100%;margin-top:2px;text-transform:none;" placeholder="e.g. My BLE Device"
+          oninput="updateProfileMeta()" title="Project name — used in generated file headers"/>
+        <div class="profile-row" style="margin-top:6px;">
+          <span class="profile-row-label">Author</span>
+        </div>
+        <input class="buuid-input" id="profile-author" maxlength="80" value=""
+          style="width:100%;margin-top:2px;text-transform:none;" placeholder="e.g. John Doe"
+          oninput="updateProfileMeta()" title="Author name — used in @author tag of generated file headers"/>
+        <div class="profile-row" style="margin-top:6px;">
+          <span class="profile-row-label">Organization</span>
+        </div>
+        <input class="buuid-input" id="profile-org" maxlength="80" value=""
+          style="width:100%;margin-top:2px;text-transform:none;" placeholder="e.g. Acme Corp"
+          oninput="updateProfileMeta()" title="Organization name — used in @copyright tag of generated file headers"/>
+        <div class="profile-row" style="margin-top:10px;">
+          <label class="checkbox-row">
+            <input type="checkbox" id="profile-generic-cbs"
+              onchange="updateProfileMeta()"/>
+            <span class="checkbox-box"></span>
+            <span class="checkbox-label">Use Generic GATT Callbacks</span>
+          </label>
+        </div>
+      </div>
+    </div>
+    <div class="sidebar-body" id="serviceTree"></div>
+  </div>
+
+  <!-- RESIZER: sidebar | main -->
+  <div class="resizer" id="resizerLeft"></div>
+
+  <!-- MAIN -->
+  <div class="main" id="mainCanvas">
+    <div class="empty-state" id="emptyState">
+      <div class="empty-icon">⬡</div>
+      <div class="empty-title">Start building your GATT database</div>
+      <div class="empty-sub">Set up your base UUID and domains on the left, then click <strong>+ Add Service</strong> to define your first GATT service — or use <strong>⬆ Load XML</strong> to import an existing one.</div>
+    </div>
+    <div id="serviceEditor" style="display:none;"></div>
+  </div>
+
+  <!-- RESIZER: main | rpanel -->
+  <div class="resizer" id="resizerRight"></div>
+
+  <!-- RIGHT PANEL -->
+  <div class="rpanel">
+    <div class="rpanel-header">
+      <div class="rpanel-tabs">
+        <div class="rpanel-tab active" onclick="switchTab('h')" id="tab-h">.h</div>
+        <div class="rpanel-tab" onclick="switchTab('c')" id="tab-c">.c</div>
+        <div class="rpanel-tab" onclick="switchTab('buuid')" id="tab-buuid">BaseUUIDs.h</div>
+        <div class="rpanel-tab" onclick="switchTab('xml')" id="tab-xml">.xml (project)</div>
+      </div>
+      <button class="btn btn-ghost" style="padding:4px 8px; font-size:11px;" onclick="copyCode()">Copy</button>
+      <button class="btn btn-ghost" style="padding:4px 8px; font-size:11px;" onclick="downloadCurrentFile()">⬇ Save</button>
+    </div>
+    <div class="rpanel-body">
+      <pre class="code-block" id="codePreview"></pre>
+    </div>
+  </div>
+
+</div>
+
+<!-- STATUS BAR -->
+<div class="statusbar">
+  <div class="status-item"><span class="status-dot"></span> Ready</div>
+  <div class="status-sep">|</div>
+  <div class="status-item" id="statServices">Services: 0</div>
+  <div class="status-sep">|</div>
+  <div class="status-item" id="statChars">Characteristics: 0</div>
+  <div class="status-sep">|</div>
+  <div class="status-item" id="statDomain">Domain: MY_DOMAIN (0x01)</div>
+  <div class="status-sep">|</div>
+  <div class="status-item">Target: Zephyr RTOS · BT_GATT_SERVICE_DEFINE</div>
+  <div class="status-item" id="statCbMode" style="color:var(--blue);">CB Mode: Per-Characteristic</div>
+  <div class="status-sep">|</div>
+  <div class="status-item" style="color:var(--green);margin-left:auto;">v1.2.2</div>
+</div>
+</div>
+
+<!-- MODAL -->
+<div class="modal-backdrop" id="modalBackdrop" style="display:none;" onclick="closeModal(event)">
+  <div class="modal" id="modalBox">
+    <div class="modal-header">
+      <div class="modal-title" id="modalTitle">Add Service</div>
+      <div class="modal-close" onclick="closeModalDirect()">✕</div>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-footer" id="modalFooter"></div>
+  </div>
+</div>
+
+<!-- NOTIFICATION -->
+<div class="notif" id="notif" style="display:none;"></div>
+
+<!-- TOOLTIP -->
+<div id="gatt-tooltip"></div>
+
+<script src="js/state.js"></script>
+<script src="js/utils.js"></script>
+<script src="js/profile.js"></script>
+<script src="js/domains.js"></script>
+<script src="js/tree.js"></script>
+<script src="js/editor.js"></script>
+<script src="js/modals.js"></script>
+<script src="js/codegen.js"></script>
+<script src="js/zip.js"></script>
+<script src="js/download.js"></script>
+<script src="js/resize.js"></script>
+<script src="js/xmlio.js"></script>
+<script src="js/theme.js"></script>
+<script src="js/tooltip.js"></script>
+<script src="js/app.js"></script>
+
+</body>
+</html>
