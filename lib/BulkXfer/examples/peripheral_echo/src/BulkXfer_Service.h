@@ -114,4 +114,4 @@
 /******************************************************************************/
 extern const struct bt_gatt_attr *gstpt_BulkSvc_Init(void);
 
-#endif /* !_BULK_XFER_SERVICE_H */
+#endif // _BULK_XFER_SERVICE_H

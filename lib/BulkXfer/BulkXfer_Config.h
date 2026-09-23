@@ -48,7 +48,7 @@
  */
 #ifndef BLK_MAX_FRAME_LEN
 #define BLK_MAX_FRAME_LEN                    (244U)
-#endif
+#endif // BLK_MAX_FRAME_LEN
 
 /**
  * @def           BLK_WINDOW_DEFAULT
@@ -58,7 +58,7 @@
  */
 #ifndef BLK_WINDOW_DEFAULT
 #define BLK_WINDOW_DEFAULT                   (16U)
-#endif
+#endif // BLK_WINDOW_DEFAULT
 
 /**
  * @def           BLK_RX_POOL_DEPTH
@@ -69,7 +69,7 @@
  */
 #ifndef BLK_RX_POOL_DEPTH
 #define BLK_RX_POOL_DEPTH                    (BLK_WINDOW_DEFAULT + 4U)
-#endif
+#endif // BLK_RX_POOL_DEPTH
 
 /**
  * @def           BLK_TX_INFLIGHT_MAX
@@ -80,7 +80,7 @@
  */
 #ifndef BLK_TX_INFLIGHT_MAX
 #define BLK_TX_INFLIGHT_MAX                  (6U)
-#endif
+#endif // BLK_TX_INFLIGHT_MAX
 
 /**
  * @def           BLK_TX_ACK_TIMEOUT_MS
@@ -89,7 +89,7 @@
  */
 #ifndef BLK_TX_ACK_TIMEOUT_MS
 #define BLK_TX_ACK_TIMEOUT_MS                (1000U)
-#endif
+#endif // BLK_TX_ACK_TIMEOUT_MS
 
 /**
  * @def           BLK_TX_MAX_RETRIES
@@ -98,7 +98,7 @@
  */
 #ifndef BLK_TX_MAX_RETRIES
 #define BLK_TX_MAX_RETRIES                   (5U)
-#endif
+#endif // BLK_TX_MAX_RETRIES
 
 /**
  * @def           BLK_RX_ACK_DELAY_MS
@@ -108,7 +108,7 @@
  */
 #ifndef BLK_RX_ACK_DELAY_MS
 #define BLK_RX_ACK_DELAY_MS                  (20U)
-#endif
+#endif // BLK_RX_ACK_DELAY_MS
 
 /**
  * @def           BLK_RX_IDLE_TIMEOUT_MS
@@ -117,7 +117,7 @@
  */
 #ifndef BLK_RX_IDLE_TIMEOUT_MS
 #define BLK_RX_IDLE_TIMEOUT_MS               (5000U)
-#endif
+#endif // BLK_RX_IDLE_TIMEOUT_MS
 
 /**
  * @def           BLK_CTRL_TX_TIMEOUT_MS
@@ -126,7 +126,7 @@
  */
 #ifndef BLK_CTRL_TX_TIMEOUT_MS
 #define BLK_CTRL_TX_TIMEOUT_MS               (200U)
-#endif
+#endif // BLK_CTRL_TX_TIMEOUT_MS
 
 /**
  * @def           BLK_NOTIFY_RETRY_MS
@@ -135,7 +135,7 @@
  */
 #ifndef BLK_NOTIFY_RETRY_MS
 #define BLK_NOTIFY_RETRY_MS                  (5U)
-#endif
+#endif // BLK_NOTIFY_RETRY_MS
 
 /**
  * @def           BLK_THREAD_STACK_SIZE
@@ -144,7 +144,7 @@
  */
 #ifndef BLK_THREAD_STACK_SIZE
 #define BLK_THREAD_STACK_SIZE                (2048U)
-#endif
+#endif // BLK_THREAD_STACK_SIZE
 
 /**
  * @def           BLK_THREAD_PRIORITY
@@ -152,7 +152,7 @@
  */
 #ifndef BLK_THREAD_PRIORITY
 #define BLK_THREAD_PRIORITY                  (5)
-#endif
+#endif // BLK_THREAD_PRIORITY
 
 /******************************************************************************/
 /*                                                                            */
@@ -184,4 +184,4 @@
 /*                                                                            */
 /******************************************************************************/
 
-#endif /* !_BULK_XFER_CONFIG_H */
+#endif // _BULK_XFER_CONFIG_H

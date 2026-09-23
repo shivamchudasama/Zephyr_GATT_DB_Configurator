@@ -91,6 +91,7 @@ static uint16_t su16_EncodeCtrl(uint8_t *u8pt_buf, uint16_t u16_bufLen,
  */
 static void sv_PutLe32(uint8_t *u8pt_dst, uint32_t u32_val)
 {
+   // Byte-wise: endian-independent, and frame fields are unaligned
    u8pt_dst[0] = (uint8_t)(u32_val);
    u8pt_dst[1] = (uint8_t)(u32_val >> 8);
    u8pt_dst[2] = (uint8_t)(u32_val >> 16);
@@ -190,6 +191,7 @@ int gi_BLK_FrameParse(const uint8_t *u8pt_buf, uint16_t u16_len,
       return -EINVAL;
    }
 
+   // No copy: the pointers below reference u8pt_buf
    (void)memset(stpt_frame, 0, sizeof(*stpt_frame));
    u8pt_pl = &u8pt_buf[BLK_FRAME_HDR_LEN];
    stpt_frame->u8_type = u8pt_buf[1];
@@ -202,6 +204,7 @@ int gi_BLK_FrameParse(const uint8_t *u8pt_buf, uint16_t u16_len,
       return 0;
    }
 
+   // Payload offsets must stay in sync with the gu16_BLK_Encode*() functions
    switch (stpt_frame->u8_type)
    {
       case eBFT_START:
@@ -368,7 +371,8 @@ uint16_t gu16_BLK_EncodeDataHeader(uint8_t *u8pt_buf, uint16_t u16_bufLen,
 {
    uint16_t u16_frameLen = (uint16_t)(BLK_DATA_HDR_LEN + u16_dataLen);
 
-   // Check if the data length is encodable and the frame fits the buffer
+   // Check if the data length is encodable and the frame fits the buffer.
+   // The len byte covers xferId + seq + data, hence 253.
    if ((u8pt_buf == NULL) || (u16_dataLen == 0U) || (u16_dataLen > 253U)
       || (u16_bufLen < u16_frameLen))
    {

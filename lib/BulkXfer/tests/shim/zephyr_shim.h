@@ -34,13 +34,13 @@
 /* ---- errno values missing from some host C libraries (old MinGW) -------- */
 #ifndef ENOTCONN
 #define ENOTCONN              128
-#endif
+#endif // ENOTCONN
 #ifndef EMSGSIZE
 #define EMSGSIZE              122
-#endif
+#endif // EMSGSIZE
 #ifndef EALREADY
 #define EALREADY              120
-#endif
+#endif // EALREADY
 
 /* ---- Toolchain / util ---------------------------------------------------- */
 #define ARG_UNUSED(x)         (void)(x)
@@ -48,10 +48,10 @@
 #define __ASSERT(c, msg)      do { if (!(c)) { printf("ASSERT: %s\n", msg); abort(); } } while (0)
 #ifndef MIN
 #define MIN(a, b)             (((a) < (b)) ? (a) : (b))
-#endif
+#endif // MIN
 #ifndef MAX
 #define MAX(a, b)             (((a) > (b)) ? (a) : (b))
-#endif
+#endif // MAX
 #define CLAMP(v, lo, hi)      MIN(MAX((v), (lo)), (hi))
 #define ARRAY_SIZE(a)         (sizeof(a) / sizeof((a)[0]))
 /* C89-compatible stand-in for Zephyr's BUILD_ASSERT (no _Static_assert). */
@@ -238,4 +238,4 @@ extern bool bt_gatt_is_subscribed(struct bt_conn *conn, const struct bt_gatt_att
    uint16_t ccc_type);
 extern uint16_t bt_gatt_get_mtu(struct bt_conn *conn);
 
-#endif /* !_ZEPHYR_SHIM_H */
+#endif // _ZEPHYR_SHIM_H

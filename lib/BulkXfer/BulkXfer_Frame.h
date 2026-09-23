@@ -127,15 +127,15 @@
  */
 #ifndef ENOTSUP
 #define ENOTSUP                              (134)
-#endif
+#endif // ENOTSUP
 
 #if (BLK_MAX_FRAME_LEN > 257U) || (BLK_MAX_FRAME_LEN < 20U)
 #error "BLK_MAX_FRAME_LEN must be in the range 20..257"
-#endif
+#endif // BLK_MAX_FRAME_LEN
 
 #if (BLK_WINDOW_DEFAULT < 2U) || (BLK_WINDOW_DEFAULT > 128U)
 #error "BLK_WINDOW_DEFAULT must be in the range 2..128"
-#endif
+#endif // BLK_WINDOW_DEFAULT
 
 /******************************************************************************/
 /*                                                                            */
@@ -303,4 +303,4 @@ extern uint16_t gu16_BLK_EncodeEnd(uint8_t *u8pt_buf, uint16_t u16_bufLen,
 extern uint16_t gu16_BLK_EncodeAbort(uint8_t *u8pt_buf, uint16_t u16_bufLen,
    uint8_t u8_xferId, uint8_t u8_reason, uint8_t u8_dir);
 
-#endif /* !_BULK_XFER_FRAME_H */
+#endif // _BULK_XFER_FRAME_H

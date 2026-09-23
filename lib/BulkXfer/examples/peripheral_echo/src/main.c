@@ -163,6 +163,7 @@ static int si_OnRxStart(uint8_t u8_appType, uint32_t u32_totalLen)
    ARG_UNUSED(u8_appType);
 
    // Check if the object fits and the echo buffer is not being sent back
+   // (it is also the source of the running echo)
    if ((u32_totalLen > sizeof(su8ar_echo)) || gb_BLK_IsTxBusy())
    {
       APP_LOG_WRN("rejecting %u bytes", u32_totalLen);
@@ -288,6 +289,7 @@ static void sv_Disconnected(struct bt_conn *stpt_conn, uint8_t u8_reason)
  */
 static void sv_Recycled(void)
 {
+   // Only now is the conn object free for a new connection
    k_work_submit(&sst_advWork);
 }
 
@@ -354,6 +356,7 @@ int main(void)
       return 0;
    }
 
+   // Advertise only after init: earlier connections would be ignored
    k_work_submit(&sst_advWork);
    APP_LOG_INF("BulkXfer echo peripheral ready");
 

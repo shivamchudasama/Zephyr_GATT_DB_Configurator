@@ -123,4 +123,4 @@ extern ssize_t gt_BLK_RxWriteHook(struct bt_conn *stpt_connHandle,
    const struct bt_gatt_attr *stpt_attr, const void *vpt_buf, uint16_t u16_length,
    uint16_t u16_offset, uint8_t u8_flags);
 
-#endif /* !_BULK_XFER_H */
+#endif // _BULK_XFER_H

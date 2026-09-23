@@ -186,4 +186,4 @@ typedef struct __packed
 /*                                                                            */
 /******************************************************************************/
 
-#endif /* !_BULK_XFER_TYPES_H */
+#endif // _BULK_XFER_TYPES_H

@@ -197,6 +197,7 @@ const struct bt_gatt_attr *gstpt_BulkSvc_Init(void)
    gv_BLK_GetCaps(&st_caps);
    gv_GATT_LocalWrite(&sst_capsDesc, &st_caps, sizeof(st_caps));
 
+   // Returns the value attribute, which notify and the CCC lookup expect
    return bt_gatt_find_by_uuid(gst_bulkXferSvc.attrs, gst_bulkXferSvc.attr_count,
       BT_UUID_BULK_XFER_TX);
 }

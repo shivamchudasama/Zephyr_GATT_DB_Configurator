@@ -211,7 +211,7 @@ static int si_RamSourceRead(void *vpt_ctx, uint32_t u32_offset, uint8_t *u8pt_bu
 #if defined(CONFIG_BT_GATT_CLIENT)
 static void sv_MtuExchanged(struct bt_conn *stpt_conn, uint8_t u8_err,
    struct bt_gatt_exchange_params *stpt_params);
-#endif
+#endif // CONFIG_BT_GATT_CLIENT
 
 /******************************************************************************/
 /*                                                                            */
@@ -382,6 +382,10 @@ static uint8_t su8ar_BLK_txFrame[BLK_MAX_FRAME_LEN];
 static void sv_EngineRunOnce(void)
 {
    (void)k_mutex_lock(&sst_BLK_lock, K_FOREVER);
+
+   // Order matters: owed completions first; events before frames so a
+   // cancelled transfer is not advanced; frames before the overflow NACK so
+   // it carries the current expected seq; pump last to use freed window space.
    sv_DeliverPendingDone();
    sv_HandleEvents();
    sv_DrainRxFifo();
@@ -389,12 +393,15 @@ static void sv_EngineRunOnce(void)
    // Check if the write hook had to drop a frame of the active transfer
    if (atomic_test_and_clear_bit(&st_BLK_events, eBE_RX_OVERFLOW) && sst_BLK_rxSession.b_active)
    {
+      // With Write Without Response the peer never sees the hook's ATT error,
+      // so this NACK is its only recovery signal
       uint8_t u8ar_frame[BLK_CTRL_FRAME_MAX_LEN];
       uint16_t u16_len = gu16_BLK_EncodeNack(u8ar_frame, sizeof(u8ar_frame),
          sst_BLK_rxSession.u8_xferId, (uint8_t)sst_BLK_rxSession.u32_nextAbsFrame,
          eBS_NO_RESOURCES);
 
       (void)si_SendCtrl(u8ar_frame, u16_len);
+
       sst_BLK_rxSession.b_nackSent = true;
    }
 
@@ -418,6 +425,8 @@ static void sv_EngineThread(void *vpt_p1, void *vpt_p2, void *vpt_p3)
 
    for (;;)
    {
+      // Binary semaphore: kicks coalesce, which is safe because every pass
+      // drains all pending work
       (void)k_sem_take(&sst_BLK_wakeSem, K_FOREVER);
       sv_EngineRunOnce();
    }
@@ -489,6 +498,7 @@ static void sv_ResetCredits(void)
 {
    uint32_t u32_idx = 0U;
 
+   // Completions of notifications lost with the link never arrive
    k_sem_reset(&sst_BLK_txCredits);
 
    for (u32_idx = 0U; u32_idx < BLK_TX_INFLIGHT_MAX; u32_idx++)
@@ -512,6 +522,8 @@ static int si_NotifyWithCredit(struct bt_conn *stpt_conn, const uint8_t *u8pt_bu
    struct bt_gatt_notify_params st_params = { 0 };
    int i_ret = 0;
 
+   // The caller holds a credit: returned by sv_NotifyComplete() on success,
+   // or below on failure
    st_params.attr = sst_BLK_cfg.stpt_txAttr;
    st_params.data = u8pt_buf;
    st_params.len = u16_len;
@@ -547,7 +559,8 @@ static int si_SendCtrl(const uint8_t *u8pt_buf, uint16_t u16_len)
       return -ENOTCONN;
    }
 
-   // Check if a TX credit becomes available in time
+   // Check if a TX credit becomes available in time. Control frames wait
+   // (bounded): a lost ACK / NACK stalls the peer until its own timeout.
    if (k_sem_take(&sst_BLK_txCredits, K_MSEC(BLK_CTRL_TX_TIMEOUT_MS)) != 0)
    {
       APP_LOG_WRN("no TX credit for control frame 0x%02x", u8pt_buf[1]);
@@ -573,6 +586,7 @@ static int si_SendCtrl(const uint8_t *u8pt_buf, uint16_t u16_len)
  */
 static uint16_t su16_FrameCapacity(struct bt_conn *stpt_conn)
 {
+   // ATT notification header: opcode (1) + handle (2)
    uint16_t u16_mtu = bt_gatt_get_mtu(stpt_conn);
    uint16_t u16_cap = (u16_mtu > 3U) ? (uint16_t)(u16_mtu - 3U) : 0U;
 
@@ -588,6 +602,7 @@ static uint16_t su16_FrameCapacity(struct bt_conn *stpt_conn)
  */
 static uint32_t su32_FrameCount(uint32_t u32_totalLen, uint8_t u8_chunkSize)
 {
+   // Avoids the overflow of (len + chunk - 1) / chunk near UINT32_MAX
    return (u32_totalLen / u8_chunkSize) + (((u32_totalLen % u8_chunkSize) != 0U) ? 1U : 0U);
 }
 
@@ -601,6 +616,8 @@ static uint32_t su32_FrameCount(uint32_t u32_totalLen, uint8_t u8_chunkSize)
  */
 static uint32_t su32_SeqToAbs(uint8_t u8_seq, uint32_t u32_base)
 {
+   // 8-bit forward distance from base to seq. A seq behind base maps ~256
+   // frames ahead; callers reject it with their range checks.
    return u32_base + (uint8_t)(u8_seq - (uint8_t)u32_base);
 }
 
@@ -611,6 +628,9 @@ static uint32_t su32_SeqToAbs(uint8_t u8_seq, uint32_t u32_base)
  */
 static void sv_DeliverPendingDone(void)
 {
+   // Recorded by gv_BLK_OnDisconnected(), which runs in BT context where
+   // callbacks must not be called
+
    // Check if a TX completion is waiting to be reported
    if (sst_BLK_pendingDone.b_txPending)
    {
@@ -644,6 +664,10 @@ static void sv_DeliverPendingDone(void)
  */
 static void sv_HandleEvents(void)
 {
+   // Bits are cleared even when the session check fails, so stale events
+   // are discarded. Aborts first, so a timeout in the same pass does not
+   // retransmit a cancelled transfer.
+
    // Check if the application aborted the outgoing transfer
    if (atomic_test_and_clear_bit(&st_BLK_events, eBE_TX_ABORT_REQ)
       && (sst_BLK_txSession.e_state != eBTS_IDLE))
@@ -760,6 +784,7 @@ static void sv_HandleFrame(const uint8_t *u8pt_buf, uint16_t u16_len)
          break;
 
       case eBFT_ABORT:
+         // xferIds are chosen per side, so the direction selects the session
          // Check if the receiver cancelled our outgoing transfer
          if ((st_frame.u_body.st_abort.u8_dir == eBAD_BY_RECEIVER)
             && (sst_BLK_txSession.e_state >= eBTS_START_SENT)
@@ -783,7 +808,7 @@ static void sv_HandleFrame(const uint8_t *u8pt_buf, uint16_t u16_len)
 }
 
 /* ======================================================================== */
-/*  TX (device -> central)                                                  */
+/*  TX (device -> central)                                                */
 /* ======================================================================== */
 
 /**
@@ -809,6 +834,8 @@ static void sv_TxFinish(BlkStatus_E e_status, bool b_sendAbort)
 
    k_timer_stop(&sst_BLK_txAckTimer);
    k_timer_stop(&sst_BLK_txRetryTimer);
+
+   // Idle before the callback, so fpt_onTxDone can start the next transfer
    sst_BLK_txSession.e_state = eBTS_IDLE;
 
    APP_LOG_INF("TX transfer %u done, status %u", sst_BLK_txSession.u8_xferId, (unsigned)e_status);
@@ -847,11 +874,13 @@ static void sv_TxOnTimeout(void)
    APP_LOG_WRN("TX transfer %u: ACK timeout, retry %u", sst_BLK_txSession.u8_xferId,
       sst_BLK_txSession.u8_retries);
 
-   // Check if START itself was never acknowledged
+   // Check if START itself was never acknowledged (the receiver re-ACKs a
+   // repeated START)
    if (sst_BLK_txSession.e_state == eBTS_START_SENT)
    {
       sst_BLK_txSession.e_state = eBTS_START_PENDING;
    }
+   // Go-Back-N: resend from the first unacknowledged frame
    else
    {
       sst_BLK_txSession.u32_nextAbsFrame = sst_BLK_txSession.u32_ackedAbsFrame;
@@ -887,6 +916,7 @@ static void sv_TxOnAck(const BlkFrame_T *stpt_frame)
          return;
       }
 
+      // The window is negotiated only here: min of both sides, <= 128
       u8_window = stpt_frame->u_body.st_ack.u8_window;
       u8_window = CLAMP(u8_window, 1U, BLK_SEQ_HALF_RANGE);
       sst_BLK_txSession.u8_window = MIN(sst_BLK_txSession.u8_window, u8_window);
@@ -896,9 +926,13 @@ static void sv_TxOnAck(const BlkFrame_T *stpt_frame)
       return;
    }
 
+   // Cumulative: seq is the receiver's next expected frame. The last frame
+   // is confirmed by END, not by an ACK.
    u32_abs = su32_SeqToAbs(stpt_frame->u_body.st_ack.u8_seq, sst_BLK_txSession.u32_ackedAbsFrame);
 
-   // Check if the ACK acknowledges new frames that were actually sent
+   // Check if the ACK acknowledges new frames that were actually sent.
+   // Duplicates must not restart the timer, or stale ACKs would keep a
+   // stuck transfer alive.
    if ((u32_abs > sst_BLK_txSession.u32_ackedAbsFrame)
       && (u32_abs <= sst_BLK_txSession.u32_nextAbsFrame))
    {
@@ -930,6 +964,7 @@ static void sv_TxOnNack(const BlkFrame_T *stpt_frame)
    // Check if the requested frame lies within what was sent
    if (u32_abs <= sst_BLK_txSession.u32_nextAbsFrame)
    {
+      // The NACK seq also acknowledges every frame before it
       APP_LOG_DBG("TX transfer %u: NACK, resend from %u (reason %u)", sst_BLK_txSession.u8_xferId,
          u32_abs, stpt_frame->u_body.st_nack.u8_reason);
       sst_BLK_txSession.u32_ackedAbsFrame = u32_abs;
@@ -972,7 +1007,8 @@ static void sv_TxPump(void)
          sst_BLK_txSession.u8_window, sst_BLK_txSession.u32_crc32);
       i_ret = si_NotifyWithCredit(sstpt_BLK_conn, su8ar_BLK_txFrame, u16_frameLen);
 
-      // Check if the host is temporarily out of buffers
+      // Check if the host is temporarily out of buffers. Retry on a timer:
+      // there may be no pending completion to kick the engine.
       if ((i_ret == -ENOMEM) || (i_ret == -EAGAIN))
       {
          k_timer_start(&sst_BLK_txRetryTimer, K_MSEC(BLK_NOTIFY_RETRY_MS), K_NO_WAIT);
@@ -1062,6 +1098,7 @@ static void sv_TxPump(void)
  */
 static void sv_RxFinish(BlkStatus_E e_status)
 {
+   // Only b_active is cleared: the callback still needs the other fields
    k_timer_stop(&sst_BLK_rxAckTimer);
    k_timer_stop(&sst_BLK_rxIdleTimer);
    sst_BLK_rxSession.b_active = false;
@@ -1104,6 +1141,7 @@ static void sv_RxSendAck(void)
       sst_BLK_rxSession.u8_xferId, (uint8_t)sst_BLK_rxSession.u32_nextAbsFrame,
       sst_BLK_rxSession.u8_window);
 
+   // Cumulative, so it supersedes any pending delayed ACK
    k_timer_stop(&sst_BLK_rxAckTimer);
    sst_BLK_rxSession.u8_sinceAck = 0U;
    (void)si_SendCtrl(u8ar_frame, u16_len);
@@ -1121,6 +1159,8 @@ static void sv_RxComplete(void)
    BlkStatus_E e_status = (sst_BLK_rxSession.u32_crc32 == sst_BLK_rxSession.u32_expectedCrc)
       ? eBS_OK : eBS_CRC_ERROR;
 
+   // END replaces the final ACK. It is not retransmitted: if it is lost,
+   // the sender ends with eBS_TIMEOUT although this side reports eBS_OK.
    u16_len = gu16_BLK_EncodeEnd(u8ar_frame, sizeof(u8ar_frame), sst_BLK_rxSession.u8_xferId,
       (uint8_t)e_status);
    (void)si_SendCtrl(u8ar_frame, u16_len);
@@ -1144,6 +1184,7 @@ static void sv_RxOnStart(const BlkFrame_T *stpt_frame)
    uint8_t u8_window = stpt_frame->u_body.st_start.u8_window;
 
    // Check if this is a repeated START of the transfer already accepted
+   // (our ACK(seq 0) was lost)
    if (sst_BLK_rxSession.b_active && (sst_BLK_rxSession.u8_xferId == u8_xferId)
       && (sst_BLK_rxSession.u32_nextAbsFrame == 0U))
    {
@@ -1207,6 +1248,7 @@ static void sv_RxOnStart(const BlkFrame_T *stpt_frame)
       return;
    }
 
+   // ACK(seq 0) accepts the transfer
    sv_RxSendAck();
    k_timer_start(&sst_BLK_rxIdleTimer, K_MSEC(BLK_RX_IDLE_TIMEOUT_MS), K_NO_WAIT);
 }
@@ -1235,6 +1277,9 @@ static void sv_RxOnData(const BlkFrame_T *stpt_frame)
    }
 
    k_timer_start(&sst_BLK_rxIdleTimer, K_MSEC(BLK_RX_IDLE_TIMEOUT_MS), K_NO_WAIT);
+
+   // Modulo-256 distance from the expected seq: 0 in order, 1..127 ahead
+   // (gap), 128..255 behind (duplicate)
    u8_diff = (uint8_t)(stpt_frame->u_body.st_data.u8_seq
       - (uint8_t)sst_BLK_rxSession.u32_nextAbsFrame);
 
@@ -1249,7 +1294,8 @@ static void sv_RxOnData(const BlkFrame_T *stpt_frame)
       return;
    }
 
-   // Check if the frame is ahead of the expected one (a frame was lost)
+   // Check if the frame is ahead of the expected one (a frame was lost).
+   // Go-Back-N: out-of-order frames are dropped, not buffered.
    if (u8_diff != 0U)
    {
       // Check if the gap was already reported
@@ -1304,7 +1350,8 @@ static void sv_RxOnData(const BlkFrame_T *stpt_frame)
    {
       sv_RxSendAck();
    }
-   // Otherwise make sure a delayed ACK is scheduled
+   // Otherwise make sure a delayed ACK is scheduled. A running timer is
+   // not restarted, or a trickle of frames would postpone it indefinitely.
    else if (k_timer_remaining_get(&sst_BLK_rxAckTimer) == 0U)
    {
       k_timer_start(&sst_BLK_rxAckTimer, K_MSEC(BLK_RX_ACK_DELAY_MS), K_NO_WAIT);
@@ -1344,7 +1391,7 @@ static void sv_MtuExchanged(struct bt_conn *stpt_conn, uint8_t u8_err,
    APP_LOG_INF("MTU exchange %s, ATT MTU %u", (u8_err == 0U) ? "done" : "failed",
       bt_gatt_get_mtu(stpt_conn));
 }
-#endif
+#endif // CONFIG_BT_GATT_CLIENT
 
 /******************************************************************************/
 /*                                                                            */
@@ -1375,10 +1422,15 @@ int gi_BLK_Init(const BlkCfg_T *stpt_cfg)
       return -EALREADY;
    }
 
+   // The engine reads sst_BLK_cfg without the lock. That is safe only
+   // because it is written once, before the thread starts.
    sst_BLK_cfg = *stpt_cfg;
+
+   // Relies on eBTS_IDLE == 0
    (void)memset(&sst_BLK_txSession, 0, sizeof(sst_BLK_txSession));
    (void)memset(&sst_BLK_rxSession, 0, sizeof(sst_BLK_rxSession));
    (void)memset(&sst_BLK_pendingDone, 0, sizeof(sst_BLK_pendingDone));
+
    sb_BLK_initialized = true;
    k_mutex_unlock(&sst_BLK_lock);
 
@@ -1408,9 +1460,19 @@ void gv_BLK_OnConnected(struct bt_conn *stpt_conn)
       return;
    }
 
+   // Own reference, released in gv_BLK_OnDisconnected()
    sstpt_BLK_conn = bt_conn_ref(stpt_conn);
+
+   // New generation: frames still queued from the previous link are
+   // dropped by sv_DrainRxFifo(). Bumped before publishing st_BLK_hookConn
+   // so the first frame accepted for this link already carries it.
    (void)atomic_inc(&st_BLK_connGen);
+
+   // Lock-free copy for the write hook, which must not block on the lock.
+   // Only compared, never dereferenced, so it holds no reference.
    (void)atomic_ptr_set(&st_BLK_hookConn, stpt_conn);
+
+   // Link tuning calls into the BT stack and may block: do it unlocked
    b_tune = sst_BLK_cfg.b_autoTuneLink;
    k_mutex_unlock(&sst_BLK_lock);
 
@@ -1419,15 +1481,16 @@ void gv_BLK_OnConnected(struct bt_conn *stpt_conn)
    {
 #if defined(CONFIG_BT_USER_PHY_UPDATE)
       (void)bt_conn_le_phy_update(stpt_conn, BT_CONN_LE_PHY_PARAM_2M);
-#endif
+#endif // CONFIG_BT_USER_PHY_UPDATE
 #if defined(CONFIG_BT_USER_DATA_LEN_UPDATE)
       (void)bt_conn_le_data_len_update(stpt_conn, BT_LE_DATA_LEN_PARAM_MAX);
-#endif
+#endif // CONFIG_BT_USER_DATA_LEN_UPDATE
+      // Static: the stack keeps this pointer until the callback runs
 #if defined(CONFIG_BT_GATT_CLIENT)
       static struct bt_gatt_exchange_params slst_BLK_mtuParams = { .func = sv_MtuExchanged };
 
       (void)bt_gatt_exchange_mtu(stpt_conn, &slst_BLK_mtuParams);
-#endif
+#endif // CONFIG_BT_GATT_CLIENT
    }
 }
 
@@ -1450,13 +1513,18 @@ void gv_BLK_OnDisconnected(struct bt_conn *stpt_conn)
       return;
    }
 
+   // Stop queueing frames for this link and invalidate those already queued
    (void)atomic_ptr_set(&st_BLK_hookConn, NULL);
    (void)atomic_inc(&st_BLK_connGen);
+
    atomic_clear(&st_BLK_events);
    k_timer_stop(&sst_BLK_txAckTimer);
    k_timer_stop(&sst_BLK_txRetryTimer);
    k_timer_stop(&sst_BLK_rxAckTimer);
    k_timer_stop(&sst_BLK_rxIdleTimer);
+
+   // Callbacks cannot run in BT context: record them for
+   // sv_DeliverPendingDone()
 
    // Check if an outgoing transfer was running
    if (sst_BLK_txSession.e_state != eBTS_IDLE)
@@ -1527,6 +1595,8 @@ int gi_BLK_Send(uint8_t u8_appType, const BlkSource_T *stpt_source,
    /* ------------------------------------------------------------------ */
    while (u32_offset < u32_totalLen)
    {
+      // Compared as uint32_t so a remainder above 65535 is not truncated;
+      // the result never exceeds BLK_CRC_READ_CHUNK
       u16_len = (uint16_t)MIN((uint32_t)sizeof(u8ar_buf), u32_totalLen - u32_offset);
 
       // Check if the source could provide the data
@@ -1573,6 +1643,8 @@ int gi_BLK_Send(uint8_t u8_appType, const BlkSource_T *stpt_source,
    // Check if all preconditions were met
    if (i_ret == 0)
    {
+      // xferId only has to differ from the previous transfer. The chunk size
+      // is fixed for the whole transfer, even if the MTU grows later.
       (void)memset(&sst_BLK_txSession, 0, sizeof(sst_BLK_txSession));
       sst_BLK_txSession.u8_xferId = ++su8_BLK_txXferCounter;
       sst_BLK_txSession.u8_appType = u8_appType;
@@ -1672,6 +1744,7 @@ int gi_BLK_SendShort(uint8_t u8_appType, const void *vpt_data, uint8_t u8_len,
    }
    else
    {
+      // Own reference: the credit wait below runs without the lock
       stpt_conn = bt_conn_ref(sstpt_BLK_conn);
    }
 
@@ -1686,7 +1759,9 @@ int gi_BLK_SendShort(uint8_t u8_appType, const void *vpt_data, uint8_t u8_len,
    u16_frameLen = gu16_BLK_EncodeShort(u8ar_frame, sizeof(u8ar_frame), u8_appType,
       (const uint8_t *)vpt_data, u8_len);
 
-   // Wait for a TX credit outside the lock so the engine keeps running
+   // Wait for a TX credit outside the lock so the engine keeps running.
+   // Called from a BulkXfer callback, this blocks the engine for up to
+   // t_timeout.
    if (k_sem_take(&sst_BLK_txCredits, t_timeout) != 0)
    {
       i_ret = -EAGAIN;
@@ -1709,6 +1784,8 @@ int gi_BLK_SendShort(uint8_t u8_appType, const void *vpt_data, uint8_t u8_len,
  */
 void gv_BLK_AbortTx(void)
 {
+   // A request made while idle is discarded on the next engine pass; a
+   // gi_BLK_Send() before that pass is aborted.
    atomic_set_bit(&st_BLK_events, eBE_TX_ABORT_REQ);
    sv_Kick();
 }
