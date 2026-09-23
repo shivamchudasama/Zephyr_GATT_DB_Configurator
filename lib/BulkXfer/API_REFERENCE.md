@@ -305,12 +305,15 @@ Used for callback results, the END status, and the ABORT / NACK reason.
 
 ### `BlkFrame_T`: decoded frame (no copy)
 Common fields are `u8_type`, `u8_payloadLen` and `u8pt_payload`. Pointers reference the parsed buffer.
-Framework frames fill one member of `u_body`:
+Framework frames fill one member of `u_body`. Fields are declared widest-first to avoid
+padding, so their order is not the wire order. Access them by name only: do not use positional
+initializers, `memcpy` from the wire, or read `u8_xferId` through a different member than the one
+matching `u8_type`.
 
-| Member | Fields |
+| Member | Fields (declaration order) |
 |---|---|
-| `st_start` | `u8_xferId, u8_appType, u32_totalLen, u8_chunkSize, u8_window, u32_crc32` |
-| `st_data` | `u8_xferId, u8_seq, u8pt_data, u8_dataLen` |
+| `st_start` | `u32_totalLen, u32_crc32, u8_xferId, u8_appType, u8_chunkSize, u8_window` |
+| `st_data` | `u8pt_data, u8_xferId, u8_seq, u8_dataLen` |
 | `st_ack` | `u8_xferId, u8_seq, u8_window` |
 | `st_nack` | `u8_xferId, u8_seq, u8_reason` |
 | `st_end` | `u8_xferId, u8_status` |

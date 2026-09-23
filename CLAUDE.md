@@ -32,7 +32,7 @@ If it disagrees with the code, the code wins; fix the reference.
 
 ## Code conventions (C libraries)
 
-- Hungarian-style prefixes: scope `g` (global) / `s` (static), then the type (`i`, `v`, `b`, `u8`, `u16`, `u32`, `t`, `pt`, `ar`, `st`, `fpt`, `e`), then `_<MODULE>_Name`, e.g. `gi_BLK_Init`, `sst_cfg`.
+- Hungarian-style prefixes: scope `g` (global) / `s` (static), then the type (`i`, `v`, `b`, `u8`, `u16`, `u32`, `t`, `pt`, `ar`, `st`, `fpt`, `e`), then `_<MODULE>_`, then the name. Variable names are lowerCamelCase and function names are PascalCase, so `sst_BLK_cfg` is a variable and `gi_BLK_Init` is a function. The module field is required for global, static and static-local variables and for global functions.
 - Scope `sl` for a `static` variable inside a function, e.g. `slst_mtuParams`. Objects created by Zephyr macros with external linkage (`K_THREAD_DEFINE`, `BT_GATT_SERVICE_DEFINE`, `BT_CONN_CB_DEFINE`) take scope `g`.
 - Types: `_T` struct, `_U` union, `_E` enum, `_F` function pointer. Union variables and members use `u`, e.g. `u_body`.
 - Enum members: `e<acronym of enum type>_<UPPER_NAME>`, e.g. `eBS_OK` in `BlkStatus_E`. This keeps them distinct from `#define`s.

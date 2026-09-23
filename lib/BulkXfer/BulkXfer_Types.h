@@ -73,8 +73,8 @@ typedef int (*BlkSourceRead_F)(void *vpt_ctx, uint32_t u32_offset,
  */
 typedef struct
 {
-   BlkSourceRead_F fpt_read;  /**< Data provider. Must not be NULL.       */
-   void *vpt_ctx;             /**< Passed back to fpt_read unchanged.     */
+   BlkSourceRead_F fpt_read;                 /**< Data provider. Must not be NULL.       */
+   void *vpt_ctx;                            /**< Passed back to fpt_read unchanged.     */
 } BlkSource_T;
 
 /**
@@ -140,11 +140,11 @@ typedef struct
     */
    const struct bt_gatt_attr *stpt_txAttr;
 
-   BlkRxStart_F fpt_onRxStart;   /**< Optional: NULL accepts every transfer. */
-   BlkRxData_F fpt_onRxData;     /**< Required to receive transfers.         */
-   BlkRxDone_F fpt_onRxDone;     /**< Optional.                              */
-   BlkRxShort_F fpt_onRxShort;   /**< Optional: NULL drops short messages.   */
-   BlkTxDone_F fpt_onTxDone;     /**< Optional.                              */
+   BlkRxStart_F fpt_onRxStart;               /**< Optional: NULL accepts every transfer. */
+   BlkRxData_F fpt_onRxData;                 /**< Required to receive transfers.         */
+   BlkRxDone_F fpt_onRxDone;                 /**< Optional.                              */
+   BlkRxShort_F fpt_onRxShort;               /**< Optional: NULL drops short messages.   */
+   BlkTxDone_F fpt_onTxDone;                 /**< Optional.                              */
 
    /**
     * @brief      When true, gv_BLK_OnConnected() requests 2M PHY and maximum
@@ -162,10 +162,10 @@ typedef struct
  */
 typedef struct __packed
 {
-   uint8_t u8_protocolVersion;   /**< BLK_PROTOCOL_VERSION.                  */
-   uint8_t u8_maxFrameLen;       /**< BLK_MAX_FRAME_LEN.                     */
-   uint8_t u8_window;            /**< BLK_WINDOW_DEFAULT.                    */
-   uint8_t u8_reserved;          /**< 0.                                     */
+   uint8_t u8_protocolVersion;               /**< BLK_PROTOCOL_VERSION.                  */
+   uint8_t u8_maxFrameLen;                   /**< BLK_MAX_FRAME_LEN.                     */
+   uint8_t u8_window;                        /**< BLK_WINDOW_DEFAULT.                    */
+   uint8_t u8_reserved;                      /**< 0.                                     */
 } BlkCaps_T;
 
 /******************************************************************************/

@@ -119,7 +119,7 @@ static void sv_LinkEvent(void)
 void gv_SimOnBlock(struct k_sem *stpt_sem)
 {
    // A blocked credit wait means the engine waits for the link to drain
-   if ((stpt_sem == &sst_txCredits) && (su32_linkCount > 0U))
+   if ((stpt_sem == &sst_BLK_txCredits) && (su32_linkCount > 0U))
    {
       sv_LinkEvent();
    }
@@ -496,9 +496,9 @@ static bool sb_Step(void)
    bool b_active = false;
 
    // Engine: run while it has been kicked
-   while (sst_wakeSem.count > 0U)
+   while (sst_BLK_wakeSem.count > 0U)
    {
-      sst_wakeSem.count = 0U;
+      sst_BLK_wakeSem.count = 0U;
       sv_EngineRunOnce();
       b_active = true;
    }
@@ -620,7 +620,7 @@ static void sv_TestDeviceToPeerSizes(void)
       CHECK(memcmp(sst_peer.u8ar_rx, su8ar_pattern, su32ar_sizes[i]) == 0);
       CHECK(su32_maxInFlight <= BLK_TX_INFLIGHT_MAX);
       CHECK(sst_peer.u32_rxMaxAhead <= BLK_WINDOW_DEFAULT);
-      CHECK(sst_txCredits.count == BLK_TX_INFLIGHT_MAX);
+      CHECK(sst_BLK_txCredits.count == BLK_TX_INFLIGHT_MAX);
       sv_Disconnect();
    }
 }
@@ -677,7 +677,7 @@ static void sv_TestPeerToDeviceSizes(void)
       CHECK(su32_devRxLen == su32ar_sizes[i]);
       CHECK(!sb_devRxOrderError);
       CHECK(memcmp(su8ar_devRx, su8ar_pattern, su32ar_sizes[i]) == 0);
-      CHECK(sst_rxSlab.used == 0U);
+      CHECK(sst_BLK_rxSlab.used == 0U);
       sv_Disconnect();
    }
 }
@@ -822,22 +822,22 @@ static void sv_TestAbortAndDisconnect(void)
    CHECK(si_devTxDone == eBS_DISCONNECTED);
    CHECK(si_devRxDone == eBS_DISCONNECTED);
    CHECK(!gb_BLK_IsTxBusy());
-   CHECK(sst_txCredits.count == BLK_TX_INFLIGHT_MAX);
+   CHECK(sst_BLK_txCredits.count == BLK_TX_INFLIGHT_MAX);
 
    // Disconnect while notifications are queued in the host: their completion
    // callbacks never run, so the engine must restore the credits itself
    sv_Connect(247U);
    CHECK(gi_BLK_SendBuffer(0x33U, su8ar_pattern, 100000U) == 0);
-   sst_wakeSem.count = 0U;
+   sst_BLK_wakeSem.count = 0U;
    sv_EngineRunOnce();               /* START                              */
    sv_LinkEvent();                   /* central ACKs START                 */
-   sst_wakeSem.count = 0U;
+   sst_BLK_wakeSem.count = 0U;
    sv_EngineRunOnce();               /* DATA burst takes the credits       */
    CHECK(su32_linkCount > 0U);
-   CHECK(sst_txCredits.count < BLK_TX_INFLIGHT_MAX);
+   CHECK(sst_BLK_txCredits.count < BLK_TX_INFLIGHT_MAX);
    sv_Disconnect();
    CHECK(si_devTxDone == eBS_DISCONNECTED);
-   CHECK(sst_txCredits.count == BLK_TX_INFLIGHT_MAX);
+   CHECK(sst_BLK_txCredits.count == BLK_TX_INFLIGHT_MAX);
 
    // No connection / not subscribed
    CHECK(gi_BLK_SendBuffer(0x31U, su8ar_pattern, 10U) == -ENOTCONN);
@@ -881,8 +881,8 @@ static void sv_TestStaleFramesAfterReconnect(void)
    gv_BLK_OnConnected(&sst_conn);
    sv_Settle(20);
    CHECK(si_devRxStartCalls == 0);
-   CHECK(!sst_rx.b_active);
-   CHECK(sst_rxSlab.used == 0U);
+   CHECK(!sst_BLK_rxSession.b_active);
+   CHECK(sst_BLK_rxSlab.used == 0U);
    sv_Disconnect();
 }
 

@@ -10,12 +10,12 @@
  *                  - BLE TX context: sv_NotifyComplete() returns a TX credit.
  *                  - Timer ISR     : timer expiry sets an event bit.
  *                  - Engine thread : everything else. All session state is
- *                                    owned by this thread under sst_lock.
- *                Every producer "kicks" the engine through sst_wakeSem; the
+ *                                    owned by this thread under sst_BLK_lock.
+ *                Every producer "kicks" the engine through sst_BLK_wakeSem; the
  *                engine drains all pending work on each wake, so coalesced
  *                kicks never lose work.
  *
- *                Flow control: sst_txCredits counts notifications handed to
+ *                Flow control: sst_BLK_txCredits counts notifications handed to
  *                the host but not yet sent. A credit is taken before every
  *                bt_gatt_notify_cb() and returned in the completion callback,
  *                which keeps the controller queue full without ever blocking on
@@ -67,29 +67,31 @@
 /******************************************************************************/
 /**
  * @enum          BlkEvent_E
- * @brief         Bit positions in sat_events.
+ * @brief         Bit positions in st_BLK_events.
  */
 typedef enum
 {
-   eBE_TX_TIMEOUT = 0,    /**< TX ACK timer expired.                   */
-   eBE_TX_RETRY,          /**< Host was out of buffers, retry pumping. */
-   eBE_RX_ACK_DUE,        /**< RX delayed-ACK timer expired.           */
-   eBE_RX_IDLE,           /**< RX inactivity timer expired.            */
-   eBE_RX_OVERFLOW,       /**< Write hook dropped a frame (no block).  */
-   eBE_TX_ABORT_REQ,      /**< Application called gv_BLK_AbortTx().    */
-   eBE_RX_ABORT_REQ,      /**< Application called gv_BLK_AbortRx().    */
+   eBE_TX_TIMEOUT = 0,                       /**< TX ACK timer expired.                   */
+   eBE_TX_RETRY,                             /**< Host was out of buffers, retry pumping. */
+   eBE_RX_ACK_DUE,                           /**< RX delayed-ACK timer expired.           */
+   eBE_RX_IDLE,                              /**< RX inactivity timer expired.            */
+   eBE_RX_OVERFLOW,                          /**< Write hook dropped a frame (no block).  */
+   eBE_TX_ABORT_REQ,                         /**< Application called gv_BLK_AbortTx().    */
+   eBE_RX_ABORT_REQ,                         /**< Application called gv_BLK_AbortRx().    */
 } BlkEvent_E;
 
 /**
  * @enum          BlkTxState_E
- * @brief         States of the outgoing transfer.
+ * @brief         States of the outgoing transfer. __packed makes it one byte
+ *                so it sits with the uint8_t members of BlkTxSession_T
+ *                without padding.
  */
-typedef enum
+typedef enum __packed
 {
-   eBTS_IDLE = 0,           /**< No transfer.                            */
-   eBTS_START_PENDING,      /**< gi_BLK_Send() accepted, START not sent. */
-   eBTS_START_SENT,         /**< START sent, waiting for ACK(seq 0).     */
-   eBTS_SENDING,            /**< DATA flowing, waiting for END.          */
+   eBTS_IDLE = 0,                            /**< No transfer.                            */
+   eBTS_START_PENDING,                       /**< gi_BLK_Send() accepted, START not sent. */
+   eBTS_START_SENT,                          /**< START sent, waiting for ACK(seq 0).     */
+   eBTS_SENDING,                             /**< DATA flowing, waiting for END.          */
 } BlkTxState_E;
 
 /******************************************************************************/
@@ -104,19 +106,21 @@ typedef enum
  */
 typedef struct
 {
-   BlkTxState_E e_state;
-   uint8_t u8_xferId;
-   uint8_t u8_appType;
-   uint8_t u8_chunkSize;
-   uint8_t u8_window;
-   uint8_t u8_retries;
-   uint32_t u32_totalLen;
-   uint32_t u32_crc32;
-   uint32_t u32_totalFrames;
-   uint32_t u32_nextAbs;      /**< Next frame to transmit.                 */
-   uint32_t u32_ackedAbs;     /**< All frames below this are acknowledged. */
-   BlkSource_T st_source;
+   BlkTxState_E e_state;                     /**< Current state of the outgoing transfer. */
+   uint8_t u8_xferId;                        /**< Transfer ID carried in every frame.     */
+   uint8_t u8_appType;                       /**< Application type given to gi_BLK_Send.  */
+   uint8_t u8_chunkSize;                     /**< Payload bytes per DATA frame.           */
+   uint8_t u8_window;                        /**< Max unacknowledged frames in flight.    */
+   uint8_t u8_retries;                       /**< Consecutive ACK timeouts so far.        */
+   uint32_t u32_totalLen;                    /**< Total object length in bytes.           */
+   uint32_t u32_crc32;                       /**< CRC-32 of the whole object.             */
+   uint32_t u32_totalFrames;                 /**< DATA frames needed for the object.      */
+   uint32_t u32_nextAbsFrame;                /**< Next frame to transmit.                 */
+   uint32_t u32_ackedAbsFrame;               /**< All frames below this are acknowledged. */
+   BlkSource_T st_source;                    /**< Data provider for the object bytes.     */
 } BlkTxSession_T;
+
+BUILD_ASSERT(sizeof(BlkTxState_E) == 1U, "BlkTxState_E must be 1 byte (__packed)");
 
 /**
  * @struct        BlkRxSession_T
@@ -124,18 +128,18 @@ typedef struct
  */
 typedef struct
 {
-   bool b_active;
-   bool b_nackSent;           /**< Suppress repeated NACKs for one gap.    */
-   uint8_t u8_xferId;
-   uint8_t u8_appType;
-   uint8_t u8_chunkSize;
-   uint8_t u8_window;
-   uint8_t u8_sinceAck;       /**< In-order frames since the last ACK.     */
-   uint32_t u32_totalLen;
-   uint32_t u32_expectedCrc;
-   uint32_t u32_crc32;
-   uint32_t u32_totalFrames;
-   uint32_t u32_nextAbs;      /**< Next expected frame.                    */
+   bool b_active;                            /**< A transfer is in progress.              */
+   bool b_nackSent;                          /**< Suppress repeated NACKs for one gap.    */
+   uint8_t u8_xferId;                        /**< Transfer ID from the START frame.       */
+   uint8_t u8_appType;                       /**< Application type from the START frame.  */
+   uint8_t u8_chunkSize;                     /**< Payload bytes per DATA frame.           */
+   uint8_t u8_window;                        /**< Window granted to the sender.           */
+   uint8_t u8_sinceAck;                      /**< In-order frames since the last ACK.     */
+   uint32_t u32_totalLen;                    /**< Total object length in bytes.           */
+   uint32_t u32_expectedCrc;                 /**< CRC-32 announced in the START frame.    */
+   uint32_t u32_crc32;                       /**< Running CRC-32 of the data received.    */
+   uint32_t u32_totalFrames;                 /**< DATA frames expected for the object.    */
+   uint32_t u32_nextAbsFrame;                /**< Next expected frame.                    */
 } BlkRxSession_T;
 
 /**
@@ -144,10 +148,10 @@ typedef struct
  */
 typedef struct
 {
-   void *vpt_fifoReserved;    /**< Required by k_fifo (first word).        */
-   atomic_val_t t_connGen;    /**< Connection generation at reception.     */
-   uint16_t u16_len;
-   uint8_t u8ar_data[BLK_MAX_FRAME_LEN];
+   void *vpt_fifoReserved;                   /**< Required by k_fifo (first word).        */
+   atomic_val_t t_connGen;                   /**< Connection generation at reception.     */
+   uint16_t u16_len;                         /**< Valid bytes in u8ar_data.               */
+   uint8_t u8ar_data[BLK_MAX_FRAME_LEN];     /**< Raw frame as written by peer.           */
 } BlkRxBlock_T;
 
 /**
@@ -157,11 +161,11 @@ typedef struct
  */
 typedef struct
 {
-   bool b_txPending;
-   uint8_t u8_txAppType;
-   bool b_rxPending;
-   uint8_t u8_rxAppType;
-   uint32_t u32_rxTotalLen;
+   bool b_txPending;                         /**< fpt_onTxDone owed for a dropped TX.     */
+   uint8_t u8_txAppType;                     /**< Application type of the dropped TX.     */
+   bool b_rxPending;                         /**< fpt_onRxDone owed for a dropped RX.     */
+   uint8_t u8_rxAppType;                     /**< Application type of the dropped RX.     */
+   uint32_t u32_rxTotalLen;                  /**< Announced length of the dropped RX.     */
 } BlkPendingDone_T;
 
 /******************************************************************************/
@@ -234,128 +238,128 @@ K_THREAD_DEFINE(gt_blkThread, BLK_THREAD_STACK_SIZE, sv_EngineThread, NULL, NULL
 /*                                                                            */
 /******************************************************************************/
 /**
- * @var           sst_lock
- * @brief         Protects all session state, sst_cfg and sstpt_conn.
+ * @var           sst_BLK_lock
+ * @brief         Protects all session state, sst_BLK_cfg and sstpt_BLK_conn.
  *                Recursive, so application callbacks may call the public API.
  */
-static K_MUTEX_DEFINE(sst_lock);
+static K_MUTEX_DEFINE(sst_BLK_lock);
 
 /**
- * @var           sst_wakeSem
+ * @var           sst_BLK_wakeSem
  * @brief         Binary "work available" signal for the engine thread.
  */
-static K_SEM_DEFINE(sst_wakeSem, 0, 1);
+static K_SEM_DEFINE(sst_BLK_wakeSem, 0, 1);
 
 /**
- * @var           sst_txCredits
+ * @var           sst_BLK_txCredits
  * @brief         Notifications that may still be handed to the host.
  */
-static K_SEM_DEFINE(sst_txCredits, BLK_TX_INFLIGHT_MAX, BLK_TX_INFLIGHT_MAX);
+static K_SEM_DEFINE(sst_BLK_txCredits, BLK_TX_INFLIGHT_MAX, BLK_TX_INFLIGHT_MAX);
 
 /**
- * @var           sst_rxFifo
+ * @var           sst_BLK_rxFifo
  * @brief         Received frames, write hook -> engine.
  */
-static K_FIFO_DEFINE(sst_rxFifo);
+static K_FIFO_DEFINE(sst_BLK_rxFifo);
 
 /**
- * @var           sst_rxSlab
+ * @var           sst_BLK_rxSlab
  * @brief         Storage for received frames.
  */
-K_MEM_SLAB_DEFINE_STATIC(sst_rxSlab, sizeof(BlkRxBlock_T), BLK_RX_POOL_DEPTH, 4);
+K_MEM_SLAB_DEFINE_STATIC(sst_BLK_rxSlab, sizeof(BlkRxBlock_T), BLK_RX_POOL_DEPTH, 4);
 
 /**
- * @var           sst_txAckTimer
+ * @var           sst_BLK_txAckTimer
  * @brief         Sender: ACK progress timeout (raises eBE_TX_TIMEOUT).
  */
-static K_TIMER_DEFINE(sst_txAckTimer, sv_TimerExpiry, NULL);
+static K_TIMER_DEFINE(sst_BLK_txAckTimer, sv_TimerExpiry, NULL);
 
 /**
- * @var           sst_txRetryTimer
+ * @var           sst_BLK_txRetryTimer
  * @brief         Sender: back-off after the host ran out of buffers (raises
  *                eBE_TX_RETRY).
  */
-static K_TIMER_DEFINE(sst_txRetryTimer, sv_TimerExpiry, NULL);
+static K_TIMER_DEFINE(sst_BLK_txRetryTimer, sv_TimerExpiry, NULL);
 
 /**
- * @var           sst_rxAckTimer
+ * @var           sst_BLK_rxAckTimer
  * @brief         Receiver: delayed-ACK timer (raises eBE_RX_ACK_DUE).
  */
-static K_TIMER_DEFINE(sst_rxAckTimer, sv_TimerExpiry, NULL);
+static K_TIMER_DEFINE(sst_BLK_rxAckTimer, sv_TimerExpiry, NULL);
 
 /**
- * @var           sst_rxIdleTimer
+ * @var           sst_BLK_rxIdleTimer
  * @brief         Receiver: inactivity timeout (raises eBE_RX_IDLE).
  */
-static K_TIMER_DEFINE(sst_rxIdleTimer, sv_TimerExpiry, NULL);
+static K_TIMER_DEFINE(sst_BLK_rxIdleTimer, sv_TimerExpiry, NULL);
 
 /**
- * @var           sst_cfg
+ * @var           sst_BLK_cfg
  * @brief         Copy of the configuration passed to gi_BLK_Init().
  */
-static BlkCfg_T sst_cfg;
+static BlkCfg_T sst_BLK_cfg;
 
 /**
- * @var           sb_initialized
+ * @var           sb_BLK_initialized
  * @brief         Set once gi_BLK_Init() has succeeded.
  */
-static bool sb_initialized = false;
+static bool sb_BLK_initialized = false;
 
 /**
- * @var           sstpt_conn
- * @brief         Current connection (referenced). Guarded by sst_lock.
+ * @var           sstpt_BLK_conn
+ * @brief         Current connection (referenced). Guarded by sst_BLK_lock.
  */
-static struct bt_conn *sstpt_conn = NULL;
+static struct bt_conn *sstpt_BLK_conn = NULL;
 
 /**
- * @var           sapt_hookConn
- * @brief         Lock-free copy of sstpt_conn for the write hook (not
+ * @var           st_BLK_hookConn
+ * @brief         Lock-free copy of sstpt_BLK_conn for the write hook (not
  *                referenced).
  */
-static atomic_ptr_t sapt_hookConn = ATOMIC_PTR_INIT(NULL);
+static atomic_ptr_t st_BLK_hookConn = ATOMIC_PTR_INIT(NULL);
 
 /**
- * @var           sat_connGen
+ * @var           st_BLK_connGen
  * @brief         Incremented on every connect / disconnect to discard stale
  *                frames.
  */
-static atomic_t sat_connGen = ATOMIC_INIT(0);
+static atomic_t st_BLK_connGen = ATOMIC_INIT(0);
 
 /**
- * @var           sat_events
+ * @var           st_BLK_events
  * @brief         Pending BlkEvent_E bits.
  */
-static atomic_t sat_events = ATOMIC_INIT(0);
+static atomic_t st_BLK_events = ATOMIC_INIT(0);
 
 /**
- * @var           sst_tx
+ * @var           sst_BLK_txSession
  * @brief         State of the outgoing transfer.
  */
-static BlkTxSession_T sst_tx;
+static BlkTxSession_T sst_BLK_txSession;
 
 /**
- * @var           sst_rx
+ * @var           sst_BLK_rxSession
  * @brief         State of the incoming transfer.
  */
-static BlkRxSession_T sst_rx;
+static BlkRxSession_T sst_BLK_rxSession;
 
 /**
- * @var           sst_pending
+ * @var           sst_BLK_pendingDone
  * @brief         Completions recorded at disconnect, reported by the engine.
  */
-static BlkPendingDone_T sst_pending;
+static BlkPendingDone_T sst_BLK_pendingDone;
 
 /**
- * @var           su8_txXferCounter
+ * @var           su8_BLK_txXferCounter
  * @brief         Source of the xferId of the next outgoing transfer.
  */
-static uint8_t su8_txXferCounter = 0U;
+static uint8_t su8_BLK_txXferCounter = 0U;
 
 /**
- * @var           su8ar_txFrame
+ * @var           su8ar_BLK_txFrame
  * @brief         DATA frame build buffer (engine thread only).
  */
-static uint8_t su8ar_txFrame[BLK_MAX_FRAME_LEN];
+static uint8_t su8ar_BLK_txFrame[BLK_MAX_FRAME_LEN];
 
 /******************************************************************************/
 /*                                                                            */
@@ -371,30 +375,31 @@ static uint8_t su8ar_txFrame[BLK_MAX_FRAME_LEN];
 /**
  * @private       sv_EngineRunOnce
  * @brief         One engine pass: process events, received frames and
- *                outgoing data under sst_lock. Separated from the thread loop
+ *                outgoing data under sst_BLK_lock. Separated from the thread loop
  *                so that host tests can drive the engine step by step.
  * @return        void
  */
 static void sv_EngineRunOnce(void)
 {
-   (void)k_mutex_lock(&sst_lock, K_FOREVER);
+   (void)k_mutex_lock(&sst_BLK_lock, K_FOREVER);
    sv_DeliverPendingDone();
    sv_HandleEvents();
    sv_DrainRxFifo();
 
    // Check if the write hook had to drop a frame of the active transfer
-   if (atomic_test_and_clear_bit(&sat_events, eBE_RX_OVERFLOW) && sst_rx.b_active)
+   if (atomic_test_and_clear_bit(&st_BLK_events, eBE_RX_OVERFLOW) && sst_BLK_rxSession.b_active)
    {
       uint8_t u8ar_frame[BLK_CTRL_FRAME_MAX_LEN];
       uint16_t u16_len = gu16_BLK_EncodeNack(u8ar_frame, sizeof(u8ar_frame),
-         sst_rx.u8_xferId, (uint8_t)sst_rx.u32_nextAbs, eBS_NO_RESOURCES);
+         sst_BLK_rxSession.u8_xferId, (uint8_t)sst_BLK_rxSession.u32_nextAbsFrame,
+         eBS_NO_RESOURCES);
 
       (void)si_SendCtrl(u8ar_frame, u16_len);
-      sst_rx.b_nackSent = true;
+      sst_BLK_rxSession.b_nackSent = true;
    }
 
    sv_TxPump();
-   k_mutex_unlock(&sst_lock);
+   k_mutex_unlock(&sst_BLK_lock);
 }
 
 /**
@@ -413,7 +418,7 @@ static void sv_EngineThread(void *vpt_p1, void *vpt_p2, void *vpt_p3)
 
    for (;;)
    {
-      (void)k_sem_take(&sst_wakeSem, K_FOREVER);
+      (void)k_sem_take(&sst_BLK_wakeSem, K_FOREVER);
       sv_EngineRunOnce();
    }
 }
@@ -425,7 +430,7 @@ static void sv_EngineThread(void *vpt_p1, void *vpt_p2, void *vpt_p3)
  */
 static void sv_Kick(void)
 {
-   k_sem_give(&sst_wakeSem);
+   k_sem_give(&sst_BLK_wakeSem);
 }
 
 /**
@@ -437,21 +442,21 @@ static void sv_Kick(void)
 static void sv_TimerExpiry(struct k_timer *stpt_timer)
 {
    // Check which timer expired and raise the matching event
-   if (stpt_timer == &sst_txAckTimer)
+   if (stpt_timer == &sst_BLK_txAckTimer)
    {
-      atomic_set_bit(&sat_events, eBE_TX_TIMEOUT);
+      atomic_set_bit(&st_BLK_events, eBE_TX_TIMEOUT);
    }
-   else if (stpt_timer == &sst_txRetryTimer)
+   else if (stpt_timer == &sst_BLK_txRetryTimer)
    {
-      atomic_set_bit(&sat_events, eBE_TX_RETRY);
+      atomic_set_bit(&st_BLK_events, eBE_TX_RETRY);
    }
-   else if (stpt_timer == &sst_rxAckTimer)
+   else if (stpt_timer == &sst_BLK_rxAckTimer)
    {
-      atomic_set_bit(&sat_events, eBE_RX_ACK_DUE);
+      atomic_set_bit(&st_BLK_events, eBE_RX_ACK_DUE);
    }
    else
    {
-      atomic_set_bit(&sat_events, eBE_RX_IDLE);
+      atomic_set_bit(&st_BLK_events, eBE_RX_IDLE);
    }
 
    sv_Kick();
@@ -471,7 +476,7 @@ static void sv_NotifyComplete(struct bt_conn *stpt_conn, void *vpt_userData)
    ARG_UNUSED(stpt_conn);
    ARG_UNUSED(vpt_userData);
 
-   k_sem_give(&sst_txCredits);
+   k_sem_give(&sst_BLK_txCredits);
    sv_Kick();
 }
 
@@ -484,11 +489,11 @@ static void sv_ResetCredits(void)
 {
    uint32_t u32_idx = 0U;
 
-   k_sem_reset(&sst_txCredits);
+   k_sem_reset(&sst_BLK_txCredits);
 
    for (u32_idx = 0U; u32_idx < BLK_TX_INFLIGHT_MAX; u32_idx++)
    {
-      k_sem_give(&sst_txCredits);
+      k_sem_give(&sst_BLK_txCredits);
    }
 }
 
@@ -507,7 +512,7 @@ static int si_NotifyWithCredit(struct bt_conn *stpt_conn, const uint8_t *u8pt_bu
    struct bt_gatt_notify_params st_params = { 0 };
    int i_ret = 0;
 
-   st_params.attr = sst_cfg.stpt_txAttr;
+   st_params.attr = sst_BLK_cfg.stpt_txAttr;
    st_params.data = u8pt_buf;
    st_params.len = u16_len;
    st_params.func = sv_NotifyComplete;
@@ -518,7 +523,7 @@ static int si_NotifyWithCredit(struct bt_conn *stpt_conn, const uint8_t *u8pt_bu
    // Check if the notification was rejected; its credit is then still ours
    if (i_ret != 0)
    {
-      k_sem_give(&sst_txCredits);
+      k_sem_give(&sst_BLK_txCredits);
    }
 
    return i_ret;
@@ -537,19 +542,19 @@ static int si_SendCtrl(const uint8_t *u8pt_buf, uint16_t u16_len)
    int i_ret = 0;
 
    // Check if there is a link and a valid frame
-   if ((sstpt_conn == NULL) || (u16_len == 0U))
+   if ((sstpt_BLK_conn == NULL) || (u16_len == 0U))
    {
       return -ENOTCONN;
    }
 
    // Check if a TX credit becomes available in time
-   if (k_sem_take(&sst_txCredits, K_MSEC(BLK_CTRL_TX_TIMEOUT_MS)) != 0)
+   if (k_sem_take(&sst_BLK_txCredits, K_MSEC(BLK_CTRL_TX_TIMEOUT_MS)) != 0)
    {
       APP_LOG_WRN("no TX credit for control frame 0x%02x", u8pt_buf[1]);
       return -EAGAIN;
    }
 
-   i_ret = si_NotifyWithCredit(sstpt_conn, u8pt_buf, u16_len);
+   i_ret = si_NotifyWithCredit(sstpt_BLK_conn, u8pt_buf, u16_len);
 
    // Check if the host refused the control frame
    if (i_ret != 0)
@@ -607,27 +612,27 @@ static uint32_t su32_SeqToAbs(uint8_t u8_seq, uint32_t u32_base)
 static void sv_DeliverPendingDone(void)
 {
    // Check if a TX completion is waiting to be reported
-   if (sst_pending.b_txPending)
+   if (sst_BLK_pendingDone.b_txPending)
    {
-      sst_pending.b_txPending = false;
+      sst_BLK_pendingDone.b_txPending = false;
 
       // Check if the application wants TX completions
-      if (sst_cfg.fpt_onTxDone != NULL)
+      if (sst_BLK_cfg.fpt_onTxDone != NULL)
       {
-         sst_cfg.fpt_onTxDone(sst_pending.u8_txAppType, eBS_DISCONNECTED);
+         sst_BLK_cfg.fpt_onTxDone(sst_BLK_pendingDone.u8_txAppType, eBS_DISCONNECTED);
       }
    }
 
    // Check if an RX completion is waiting to be reported
-   if (sst_pending.b_rxPending)
+   if (sst_BLK_pendingDone.b_rxPending)
    {
-      sst_pending.b_rxPending = false;
+      sst_BLK_pendingDone.b_rxPending = false;
 
       // Check if the application wants RX completions
-      if (sst_cfg.fpt_onRxDone != NULL)
+      if (sst_BLK_cfg.fpt_onRxDone != NULL)
       {
-         sst_cfg.fpt_onRxDone(sst_pending.u8_rxAppType, eBS_DISCONNECTED,
-            sst_pending.u32_rxTotalLen);
+         sst_BLK_cfg.fpt_onRxDone(sst_BLK_pendingDone.u8_rxAppType, eBS_DISCONNECTED,
+            sst_BLK_pendingDone.u32_rxTotalLen);
       }
    }
 }
@@ -640,37 +645,37 @@ static void sv_DeliverPendingDone(void)
 static void sv_HandleEvents(void)
 {
    // Check if the application aborted the outgoing transfer
-   if (atomic_test_and_clear_bit(&sat_events, eBE_TX_ABORT_REQ)
-      && (sst_tx.e_state != eBTS_IDLE))
+   if (atomic_test_and_clear_bit(&st_BLK_events, eBE_TX_ABORT_REQ)
+      && (sst_BLK_txSession.e_state != eBTS_IDLE))
    {
-      sv_TxFinish(eBS_ABORTED, sst_tx.e_state != eBTS_START_PENDING);
+      sv_TxFinish(eBS_ABORTED, sst_BLK_txSession.e_state != eBTS_START_PENDING);
    }
 
    // Check if the application aborted the incoming transfer
-   if (atomic_test_and_clear_bit(&sat_events, eBE_RX_ABORT_REQ) && sst_rx.b_active)
+   if (atomic_test_and_clear_bit(&st_BLK_events, eBE_RX_ABORT_REQ) && sst_BLK_rxSession.b_active)
    {
       sv_RxAbort(eBS_ABORTED);
    }
 
    // Check if the TX ACK timer expired
-   if (atomic_test_and_clear_bit(&sat_events, eBE_TX_TIMEOUT))
+   if (atomic_test_and_clear_bit(&st_BLK_events, eBE_TX_TIMEOUT))
    {
       sv_TxOnTimeout();
    }
 
    // The retry event only needs to wake the engine; sv_TxPump() does the work
-   (void)atomic_test_and_clear_bit(&sat_events, eBE_TX_RETRY);
+   (void)atomic_test_and_clear_bit(&st_BLK_events, eBE_TX_RETRY);
 
    // Check if a delayed ACK is due
-   if (atomic_test_and_clear_bit(&sat_events, eBE_RX_ACK_DUE) && sst_rx.b_active)
+   if (atomic_test_and_clear_bit(&st_BLK_events, eBE_RX_ACK_DUE) && sst_BLK_rxSession.b_active)
    {
       sv_RxSendAck();
    }
 
    // Check if the incoming transfer went silent
-   if (atomic_test_and_clear_bit(&sat_events, eBE_RX_IDLE) && sst_rx.b_active)
+   if (atomic_test_and_clear_bit(&st_BLK_events, eBE_RX_IDLE) && sst_BLK_rxSession.b_active)
    {
-      APP_LOG_WRN("RX transfer %u timed out", sst_rx.u8_xferId);
+      APP_LOG_WRN("RX transfer %u timed out", sst_BLK_rxSession.u8_xferId);
       sv_RxAbort(eBS_TIMEOUT);
    }
 }
@@ -684,15 +689,15 @@ static void sv_DrainRxFifo(void)
 {
    BlkRxBlock_T *stpt_blk = NULL;
 
-   while ((stpt_blk = k_fifo_get(&sst_rxFifo, K_NO_WAIT)) != NULL)
+   while ((stpt_blk = k_fifo_get(&sst_BLK_rxFifo, K_NO_WAIT)) != NULL)
    {
       // Check if the frame belongs to the current connection
-      if (stpt_blk->t_connGen == atomic_get(&sat_connGen))
+      if (stpt_blk->t_connGen == atomic_get(&st_BLK_connGen))
       {
          sv_HandleFrame(stpt_blk->u8ar_data, stpt_blk->u16_len);
       }
 
-      k_mem_slab_free(&sst_rxSlab, stpt_blk);
+      k_mem_slab_free(&sst_BLK_rxSlab, stpt_blk);
    }
 }
 
@@ -719,9 +724,9 @@ static void sv_HandleFrame(const uint8_t *u8pt_buf, uint16_t u16_len)
    if (st_frame.u8_type <= BLK_APP_TYPE_MAX)
    {
       // Check if the application handles short messages
-      if (sst_cfg.fpt_onRxShort != NULL)
+      if (sst_BLK_cfg.fpt_onRxShort != NULL)
       {
-         sst_cfg.fpt_onRxShort(st_frame.u8_type, st_frame.u8pt_payload,
+         sst_BLK_cfg.fpt_onRxShort(st_frame.u8_type, st_frame.u8pt_payload,
             st_frame.u8_payloadLen);
       }
       return;
@@ -747,8 +752,8 @@ static void sv_HandleFrame(const uint8_t *u8pt_buf, uint16_t u16_len)
 
       case eBFT_END:
          // Check if the END refers to the outgoing transfer
-         if ((sst_tx.e_state >= eBTS_START_SENT)
-            && (st_frame.u_body.st_end.u8_xferId == sst_tx.u8_xferId))
+         if ((sst_BLK_txSession.e_state >= eBTS_START_SENT)
+            && (st_frame.u_body.st_end.u8_xferId == sst_BLK_txSession.u8_xferId))
          {
             sv_TxFinish((BlkStatus_E)st_frame.u_body.st_end.u8_status, false);
          }
@@ -757,16 +762,16 @@ static void sv_HandleFrame(const uint8_t *u8pt_buf, uint16_t u16_len)
       case eBFT_ABORT:
          // Check if the receiver cancelled our outgoing transfer
          if ((st_frame.u_body.st_abort.u8_dir == eBAD_BY_RECEIVER)
-            && (sst_tx.e_state >= eBTS_START_SENT)
-            && (st_frame.u_body.st_abort.u8_xferId == sst_tx.u8_xferId))
+            && (sst_BLK_txSession.e_state >= eBTS_START_SENT)
+            && (st_frame.u_body.st_abort.u8_xferId == sst_BLK_txSession.u8_xferId))
          {
             sv_TxFinish((st_frame.u_body.st_abort.u8_reason == eBS_REJECTED)
                ? eBS_REJECTED : eBS_REMOTE_ABORTED, false);
          }
          // Check if the sender cancelled our incoming transfer
          else if ((st_frame.u_body.st_abort.u8_dir == eBAD_BY_SENDER)
-            && sst_rx.b_active
-            && (st_frame.u_body.st_abort.u8_xferId == sst_rx.u8_xferId))
+            && sst_BLK_rxSession.b_active
+            && (st_frame.u_body.st_abort.u8_xferId == sst_BLK_rxSession.u8_xferId))
          {
             sv_RxFinish(eBS_REMOTE_ABORTED);
          }
@@ -790,28 +795,28 @@ static void sv_HandleFrame(const uint8_t *u8pt_buf, uint16_t u16_len)
  */
 static void sv_TxFinish(BlkStatus_E e_status, bool b_sendAbort)
 {
-   uint8_t u8_appType = sst_tx.u8_appType;
+   uint8_t u8_appType = sst_BLK_txSession.u8_appType;
 
    // Check if the receiver must be told that the transfer is cancelled
    if (b_sendAbort)
    {
       uint8_t u8ar_frame[BLK_CTRL_FRAME_MAX_LEN];
       uint16_t u16_len = gu16_BLK_EncodeAbort(u8ar_frame, sizeof(u8ar_frame),
-         sst_tx.u8_xferId, (uint8_t)e_status, eBAD_BY_SENDER);
+         sst_BLK_txSession.u8_xferId, (uint8_t)e_status, eBAD_BY_SENDER);
 
       (void)si_SendCtrl(u8ar_frame, u16_len);
    }
 
-   k_timer_stop(&sst_txAckTimer);
-   k_timer_stop(&sst_txRetryTimer);
-   sst_tx.e_state = eBTS_IDLE;
+   k_timer_stop(&sst_BLK_txAckTimer);
+   k_timer_stop(&sst_BLK_txRetryTimer);
+   sst_BLK_txSession.e_state = eBTS_IDLE;
 
-   APP_LOG_INF("TX transfer %u done, status %u", sst_tx.u8_xferId, (unsigned)e_status);
+   APP_LOG_INF("TX transfer %u done, status %u", sst_BLK_txSession.u8_xferId, (unsigned)e_status);
 
    // Check if the application wants TX completions
-   if (sst_cfg.fpt_onTxDone != NULL)
+   if (sst_BLK_cfg.fpt_onTxDone != NULL)
    {
-      sst_cfg.fpt_onTxDone(u8_appType, e_status);
+      sst_BLK_cfg.fpt_onTxDone(u8_appType, e_status);
    }
 }
 
@@ -824,34 +829,35 @@ static void sv_TxFinish(BlkStatus_E e_status, bool b_sendAbort)
 static void sv_TxOnTimeout(void)
 {
    // Check if there is a transfer waiting for the peer
-   if ((sst_tx.e_state != eBTS_START_SENT) && (sst_tx.e_state != eBTS_SENDING))
+   if ((sst_BLK_txSession.e_state != eBTS_START_SENT)
+      && (sst_BLK_txSession.e_state != eBTS_SENDING))
    {
       return;
    }
 
-   sst_tx.u8_retries++;
+   sst_BLK_txSession.u8_retries++;
 
    // Check if the peer has been silent for too long
-   if (sst_tx.u8_retries > BLK_TX_MAX_RETRIES)
+   if (sst_BLK_txSession.u8_retries > BLK_TX_MAX_RETRIES)
    {
       sv_TxFinish(eBS_TIMEOUT, true);
       return;
    }
 
-   APP_LOG_WRN("TX transfer %u: ACK timeout, retry %u", sst_tx.u8_xferId,
-      sst_tx.u8_retries);
+   APP_LOG_WRN("TX transfer %u: ACK timeout, retry %u", sst_BLK_txSession.u8_xferId,
+      sst_BLK_txSession.u8_retries);
 
    // Check if START itself was never acknowledged
-   if (sst_tx.e_state == eBTS_START_SENT)
+   if (sst_BLK_txSession.e_state == eBTS_START_SENT)
    {
-      sst_tx.e_state = eBTS_START_PENDING;
+      sst_BLK_txSession.e_state = eBTS_START_PENDING;
    }
    else
    {
-      sst_tx.u32_nextAbs = sst_tx.u32_ackedAbs;
+      sst_BLK_txSession.u32_nextAbsFrame = sst_BLK_txSession.u32_ackedAbsFrame;
    }
 
-   k_timer_start(&sst_txAckTimer, K_MSEC(BLK_TX_ACK_TIMEOUT_MS), K_NO_WAIT);
+   k_timer_start(&sst_BLK_txAckTimer, K_MSEC(BLK_TX_ACK_TIMEOUT_MS), K_NO_WAIT);
 }
 
 /**
@@ -866,14 +872,14 @@ static void sv_TxOnAck(const BlkFrame_T *stpt_frame)
    uint8_t u8_window = 0U;
 
    // Check if the ACK belongs to the outgoing transfer
-   if ((stpt_frame->u_body.st_ack.u8_xferId != sst_tx.u8_xferId)
-      || (sst_tx.e_state < eBTS_START_SENT))
+   if ((stpt_frame->u_body.st_ack.u8_xferId != sst_BLK_txSession.u8_xferId)
+      || (sst_BLK_txSession.e_state < eBTS_START_SENT))
    {
       return;
    }
 
    // Check if this is the receiver accepting START
-   if (sst_tx.e_state == eBTS_START_SENT)
+   if (sst_BLK_txSession.e_state == eBTS_START_SENT)
    {
       // Check if the ACK is the expected START acknowledgement (seq 0)
       if (stpt_frame->u_body.st_ack.u8_seq != 0U)
@@ -883,21 +889,22 @@ static void sv_TxOnAck(const BlkFrame_T *stpt_frame)
 
       u8_window = stpt_frame->u_body.st_ack.u8_window;
       u8_window = CLAMP(u8_window, 1U, BLK_SEQ_HALF_RANGE);
-      sst_tx.u8_window = MIN(sst_tx.u8_window, u8_window);
-      sst_tx.e_state = eBTS_SENDING;
-      sst_tx.u8_retries = 0U;
-      k_timer_start(&sst_txAckTimer, K_MSEC(BLK_TX_ACK_TIMEOUT_MS), K_NO_WAIT);
+      sst_BLK_txSession.u8_window = MIN(sst_BLK_txSession.u8_window, u8_window);
+      sst_BLK_txSession.e_state = eBTS_SENDING;
+      sst_BLK_txSession.u8_retries = 0U;
+      k_timer_start(&sst_BLK_txAckTimer, K_MSEC(BLK_TX_ACK_TIMEOUT_MS), K_NO_WAIT);
       return;
    }
 
-   u32_abs = su32_SeqToAbs(stpt_frame->u_body.st_ack.u8_seq, sst_tx.u32_ackedAbs);
+   u32_abs = su32_SeqToAbs(stpt_frame->u_body.st_ack.u8_seq, sst_BLK_txSession.u32_ackedAbsFrame);
 
    // Check if the ACK acknowledges new frames that were actually sent
-   if ((u32_abs > sst_tx.u32_ackedAbs) && (u32_abs <= sst_tx.u32_nextAbs))
+   if ((u32_abs > sst_BLK_txSession.u32_ackedAbsFrame)
+      && (u32_abs <= sst_BLK_txSession.u32_nextAbsFrame))
    {
-      sst_tx.u32_ackedAbs = u32_abs;
-      sst_tx.u8_retries = 0U;
-      k_timer_start(&sst_txAckTimer, K_MSEC(BLK_TX_ACK_TIMEOUT_MS), K_NO_WAIT);
+      sst_BLK_txSession.u32_ackedAbsFrame = u32_abs;
+      sst_BLK_txSession.u8_retries = 0U;
+      k_timer_start(&sst_BLK_txAckTimer, K_MSEC(BLK_TX_ACK_TIMEOUT_MS), K_NO_WAIT);
    }
 }
 
@@ -912,22 +919,22 @@ static void sv_TxOnNack(const BlkFrame_T *stpt_frame)
    uint32_t u32_abs = 0U;
 
    // Check if the NACK belongs to the outgoing transfer in data phase
-   if ((stpt_frame->u_body.st_nack.u8_xferId != sst_tx.u8_xferId)
-      || (sst_tx.e_state != eBTS_SENDING))
+   if ((stpt_frame->u_body.st_nack.u8_xferId != sst_BLK_txSession.u8_xferId)
+      || (sst_BLK_txSession.e_state != eBTS_SENDING))
    {
       return;
    }
 
-   u32_abs = su32_SeqToAbs(stpt_frame->u_body.st_nack.u8_seq, sst_tx.u32_ackedAbs);
+   u32_abs = su32_SeqToAbs(stpt_frame->u_body.st_nack.u8_seq, sst_BLK_txSession.u32_ackedAbsFrame);
 
    // Check if the requested frame lies within what was sent
-   if (u32_abs <= sst_tx.u32_nextAbs)
+   if (u32_abs <= sst_BLK_txSession.u32_nextAbsFrame)
    {
-      APP_LOG_DBG("TX transfer %u: NACK, resend from %u (reason %u)", sst_tx.u8_xferId,
+      APP_LOG_DBG("TX transfer %u: NACK, resend from %u (reason %u)", sst_BLK_txSession.u8_xferId,
          u32_abs, stpt_frame->u_body.st_nack.u8_reason);
-      sst_tx.u32_ackedAbs = u32_abs;
-      sst_tx.u32_nextAbs = u32_abs;
-      k_timer_start(&sst_txAckTimer, K_MSEC(BLK_TX_ACK_TIMEOUT_MS), K_NO_WAIT);
+      sst_BLK_txSession.u32_ackedAbsFrame = u32_abs;
+      sst_BLK_txSession.u32_nextAbsFrame = u32_abs;
+      k_timer_start(&sst_BLK_txAckTimer, K_MSEC(BLK_TX_ACK_TIMEOUT_MS), K_NO_WAIT);
    }
 }
 
@@ -945,29 +952,30 @@ static void sv_TxPump(void)
    int i_ret = 0;
 
    // Check if there is a link to send on
-   if (sstpt_conn == NULL)
+   if (sstpt_BLK_conn == NULL)
    {
       return;
    }
 
    // Check if START still has to be sent
-   if (sst_tx.e_state == eBTS_START_PENDING)
+   if (sst_BLK_txSession.e_state == eBTS_START_PENDING)
    {
       // Check if a TX credit is free; otherwise the completion kick retries
-      if (k_sem_take(&sst_txCredits, K_NO_WAIT) != 0)
+      if (k_sem_take(&sst_BLK_txCredits, K_NO_WAIT) != 0)
       {
          return;
       }
 
-      u16_frameLen = gu16_BLK_EncodeStart(su8ar_txFrame, sizeof(su8ar_txFrame),
-         sst_tx.u8_xferId, sst_tx.u8_appType, sst_tx.u32_totalLen, sst_tx.u8_chunkSize,
-         sst_tx.u8_window, sst_tx.u32_crc32);
-      i_ret = si_NotifyWithCredit(sstpt_conn, su8ar_txFrame, u16_frameLen);
+      u16_frameLen = gu16_BLK_EncodeStart(su8ar_BLK_txFrame, sizeof(su8ar_BLK_txFrame),
+         sst_BLK_txSession.u8_xferId, sst_BLK_txSession.u8_appType,
+         sst_BLK_txSession.u32_totalLen, sst_BLK_txSession.u8_chunkSize,
+         sst_BLK_txSession.u8_window, sst_BLK_txSession.u32_crc32);
+      i_ret = si_NotifyWithCredit(sstpt_BLK_conn, su8ar_BLK_txFrame, u16_frameLen);
 
       // Check if the host is temporarily out of buffers
       if ((i_ret == -ENOMEM) || (i_ret == -EAGAIN))
       {
-         k_timer_start(&sst_txRetryTimer, K_MSEC(BLK_NOTIFY_RETRY_MS), K_NO_WAIT);
+         k_timer_start(&sst_BLK_txRetryTimer, K_MSEC(BLK_NOTIFY_RETRY_MS), K_NO_WAIT);
          return;
       }
 
@@ -980,51 +988,52 @@ static void sv_TxPump(void)
          return;
       }
 
-      sst_tx.e_state = eBTS_START_SENT;
-      k_timer_start(&sst_txAckTimer, K_MSEC(BLK_TX_ACK_TIMEOUT_MS), K_NO_WAIT);
+      sst_BLK_txSession.e_state = eBTS_START_SENT;
+      k_timer_start(&sst_BLK_txAckTimer, K_MSEC(BLK_TX_ACK_TIMEOUT_MS), K_NO_WAIT);
       return;
    }
 
    // Check if the transfer is in its data phase
-   if (sst_tx.e_state != eBTS_SENDING)
+   if (sst_BLK_txSession.e_state != eBTS_SENDING)
    {
       return;
    }
 
-   while ((sst_tx.u32_nextAbs < sst_tx.u32_totalFrames)
-      && ((sst_tx.u32_nextAbs - sst_tx.u32_ackedAbs) < sst_tx.u8_window))
+   while ((sst_BLK_txSession.u32_nextAbsFrame < sst_BLK_txSession.u32_totalFrames)
+      && ((sst_BLK_txSession.u32_nextAbsFrame - sst_BLK_txSession.u32_ackedAbsFrame)
+         < sst_BLK_txSession.u8_window))
    {
       // Check if a TX credit is free; otherwise the completion kick resumes
-      if (k_sem_take(&sst_txCredits, K_NO_WAIT) != 0)
+      if (k_sem_take(&sst_BLK_txCredits, K_NO_WAIT) != 0)
       {
          break;
       }
 
-      u32_offset = sst_tx.u32_nextAbs * sst_tx.u8_chunkSize;
-      u16_dataLen = (uint16_t)MIN((uint32_t)sst_tx.u8_chunkSize,
-         sst_tx.u32_totalLen - u32_offset);
-      u16_frameLen = gu16_BLK_EncodeDataHeader(su8ar_txFrame, sizeof(su8ar_txFrame),
-         sst_tx.u8_xferId, (uint8_t)sst_tx.u32_nextAbs, u16_dataLen);
+      u32_offset = sst_BLK_txSession.u32_nextAbsFrame * sst_BLK_txSession.u8_chunkSize;
+      u16_dataLen = (uint16_t)MIN((uint32_t)sst_BLK_txSession.u8_chunkSize,
+         sst_BLK_txSession.u32_totalLen - u32_offset);
+      u16_frameLen = gu16_BLK_EncodeDataHeader(su8ar_BLK_txFrame, sizeof(su8ar_BLK_txFrame),
+         sst_BLK_txSession.u8_xferId, (uint8_t)sst_BLK_txSession.u32_nextAbsFrame, u16_dataLen);
 
       // Read the chunk straight into the frame, behind the header (no copy)
-      i_ret = sst_tx.st_source.fpt_read(sst_tx.st_source.vpt_ctx, u32_offset,
-         &su8ar_txFrame[BLK_DATA_HDR_LEN], u16_dataLen);
+      i_ret = sst_BLK_txSession.st_source.fpt_read(sst_BLK_txSession.st_source.vpt_ctx, u32_offset,
+         &su8ar_BLK_txFrame[BLK_DATA_HDR_LEN], u16_dataLen);
 
       // Check if the application's source failed
       if (i_ret != 0)
       {
-         k_sem_give(&sst_txCredits);
+         k_sem_give(&sst_BLK_txCredits);
          APP_LOG_ERR("source read failed at offset %u (%d)", u32_offset, i_ret);
          sv_TxFinish(eBS_SOURCE_ERROR, true);
          return;
       }
 
-      i_ret = si_NotifyWithCredit(sstpt_conn, su8ar_txFrame, u16_frameLen);
+      i_ret = si_NotifyWithCredit(sstpt_BLK_conn, su8ar_BLK_txFrame, u16_frameLen);
 
       // Check if the host is temporarily out of buffers
       if ((i_ret == -ENOMEM) || (i_ret == -EAGAIN))
       {
-         k_timer_start(&sst_txRetryTimer, K_MSEC(BLK_NOTIFY_RETRY_MS), K_NO_WAIT);
+         k_timer_start(&sst_BLK_txRetryTimer, K_MSEC(BLK_NOTIFY_RETRY_MS), K_NO_WAIT);
          break;
       }
 
@@ -1037,7 +1046,7 @@ static void sv_TxPump(void)
          return;
       }
 
-      sst_tx.u32_nextAbs++;
+      sst_BLK_txSession.u32_nextAbsFrame++;
    }
 }
 
@@ -1053,16 +1062,17 @@ static void sv_TxPump(void)
  */
 static void sv_RxFinish(BlkStatus_E e_status)
 {
-   k_timer_stop(&sst_rxAckTimer);
-   k_timer_stop(&sst_rxIdleTimer);
-   sst_rx.b_active = false;
+   k_timer_stop(&sst_BLK_rxAckTimer);
+   k_timer_stop(&sst_BLK_rxIdleTimer);
+   sst_BLK_rxSession.b_active = false;
 
-   APP_LOG_INF("RX transfer %u done, status %u", sst_rx.u8_xferId, (unsigned)e_status);
+   APP_LOG_INF("RX transfer %u done, status %u", sst_BLK_rxSession.u8_xferId, (unsigned)e_status);
 
    // Check if the application wants RX completions
-   if (sst_cfg.fpt_onRxDone != NULL)
+   if (sst_BLK_cfg.fpt_onRxDone != NULL)
    {
-      sst_cfg.fpt_onRxDone(sst_rx.u8_appType, e_status, sst_rx.u32_totalLen);
+      sst_BLK_cfg.fpt_onRxDone(sst_BLK_rxSession.u8_appType, e_status,
+         sst_BLK_rxSession.u32_totalLen);
    }
 }
 
@@ -1076,7 +1086,7 @@ static void sv_RxAbort(BlkStatus_E e_status)
 {
    uint8_t u8ar_frame[BLK_CTRL_FRAME_MAX_LEN];
    uint16_t u16_len = gu16_BLK_EncodeAbort(u8ar_frame, sizeof(u8ar_frame),
-      sst_rx.u8_xferId, (uint8_t)e_status, eBAD_BY_RECEIVER);
+      sst_BLK_rxSession.u8_xferId, (uint8_t)e_status, eBAD_BY_RECEIVER);
 
    (void)si_SendCtrl(u8ar_frame, u16_len);
    sv_RxFinish(e_status);
@@ -1091,10 +1101,11 @@ static void sv_RxSendAck(void)
 {
    uint8_t u8ar_frame[BLK_CTRL_FRAME_MAX_LEN];
    uint16_t u16_len = gu16_BLK_EncodeAck(u8ar_frame, sizeof(u8ar_frame),
-      sst_rx.u8_xferId, (uint8_t)sst_rx.u32_nextAbs, sst_rx.u8_window);
+      sst_BLK_rxSession.u8_xferId, (uint8_t)sst_BLK_rxSession.u32_nextAbsFrame,
+      sst_BLK_rxSession.u8_window);
 
-   k_timer_stop(&sst_rxAckTimer);
-   sst_rx.u8_sinceAck = 0U;
+   k_timer_stop(&sst_BLK_rxAckTimer);
+   sst_BLK_rxSession.u8_sinceAck = 0U;
    (void)si_SendCtrl(u8ar_frame, u16_len);
 }
 
@@ -1107,10 +1118,10 @@ static void sv_RxComplete(void)
 {
    uint8_t u8ar_frame[BLK_CTRL_FRAME_MAX_LEN];
    uint16_t u16_len = 0U;
-   BlkStatus_E e_status = (sst_rx.u32_crc32 == sst_rx.u32_expectedCrc)
+   BlkStatus_E e_status = (sst_BLK_rxSession.u32_crc32 == sst_BLK_rxSession.u32_expectedCrc)
       ? eBS_OK : eBS_CRC_ERROR;
 
-   u16_len = gu16_BLK_EncodeEnd(u8ar_frame, sizeof(u8ar_frame), sst_rx.u8_xferId,
+   u16_len = gu16_BLK_EncodeEnd(u8ar_frame, sizeof(u8ar_frame), sst_BLK_rxSession.u8_xferId,
       (uint8_t)e_status);
    (void)si_SendCtrl(u8ar_frame, u16_len);
    sv_RxFinish(e_status);
@@ -1133,16 +1144,17 @@ static void sv_RxOnStart(const BlkFrame_T *stpt_frame)
    uint8_t u8_window = stpt_frame->u_body.st_start.u8_window;
 
    // Check if this is a repeated START of the transfer already accepted
-   if (sst_rx.b_active && (sst_rx.u8_xferId == u8_xferId) && (sst_rx.u32_nextAbs == 0U))
+   if (sst_BLK_rxSession.b_active && (sst_BLK_rxSession.u8_xferId == u8_xferId)
+      && (sst_BLK_rxSession.u32_nextAbsFrame == 0U))
    {
       sv_RxSendAck();
       return;
    }
 
    // Check if a new START supersedes an unfinished transfer
-   if (sst_rx.b_active)
+   if (sst_BLK_rxSession.b_active)
    {
-      APP_LOG_WRN("RX transfer %u superseded by %u", sst_rx.u8_xferId, u8_xferId);
+      APP_LOG_WRN("RX transfer %u superseded by %u", sst_BLK_rxSession.u8_xferId, u8_xferId);
       sv_RxFinish(eBS_REMOTE_ABORTED);
    }
 
@@ -1153,13 +1165,13 @@ static void sv_RxOnStart(const BlkFrame_T *stpt_frame)
       e_reject = eBS_PROTOCOL_ERROR;
    }
    // Check if the application is able to receive transfers
-   else if (sst_cfg.fpt_onRxData == NULL)
+   else if (sst_BLK_cfg.fpt_onRxData == NULL)
    {
       e_reject = eBS_REJECTED;
    }
    // Check if the application accepts this particular transfer
-   else if ((sst_cfg.fpt_onRxStart != NULL)
-      && (sst_cfg.fpt_onRxStart(stpt_frame->u_body.st_start.u8_appType,
+   else if ((sst_BLK_cfg.fpt_onRxStart != NULL)
+      && (sst_BLK_cfg.fpt_onRxStart(stpt_frame->u_body.st_start.u8_appType,
          stpt_frame->u_body.st_start.u32_totalLen) != 0))
    {
       e_reject = eBS_REJECTED;
@@ -1174,28 +1186,29 @@ static void sv_RxOnStart(const BlkFrame_T *stpt_frame)
       return;
    }
 
-   (void)memset(&sst_rx, 0, sizeof(sst_rx));
-   sst_rx.b_active = true;
-   sst_rx.u8_xferId = u8_xferId;
-   sst_rx.u8_appType = stpt_frame->u_body.st_start.u8_appType;
-   sst_rx.u8_chunkSize = u8_chunk;
-   sst_rx.u8_window = MIN(u8_window, (uint8_t)BLK_WINDOW_DEFAULT);
-   sst_rx.u32_totalLen = stpt_frame->u_body.st_start.u32_totalLen;
-   sst_rx.u32_expectedCrc = stpt_frame->u_body.st_start.u32_crc32;
-   sst_rx.u32_totalFrames = su32_FrameCount(sst_rx.u32_totalLen, u8_chunk);
+   (void)memset(&sst_BLK_rxSession, 0, sizeof(sst_BLK_rxSession));
+   sst_BLK_rxSession.b_active = true;
+   sst_BLK_rxSession.u8_xferId = u8_xferId;
+   sst_BLK_rxSession.u8_appType = stpt_frame->u_body.st_start.u8_appType;
+   sst_BLK_rxSession.u8_chunkSize = u8_chunk;
+   sst_BLK_rxSession.u8_window = MIN(u8_window, (uint8_t)BLK_WINDOW_DEFAULT);
+   sst_BLK_rxSession.u32_totalLen = stpt_frame->u_body.st_start.u32_totalLen;
+   sst_BLK_rxSession.u32_expectedCrc = stpt_frame->u_body.st_start.u32_crc32;
+   sst_BLK_rxSession.u32_totalFrames = su32_FrameCount(sst_BLK_rxSession.u32_totalLen, u8_chunk);
 
    APP_LOG_INF("RX transfer %u: type 0x%02x, %u bytes in %u frames", u8_xferId,
-      sst_rx.u8_appType, sst_rx.u32_totalLen, sst_rx.u32_totalFrames);
+      sst_BLK_rxSession.u8_appType, sst_BLK_rxSession.u32_totalLen,
+      sst_BLK_rxSession.u32_totalFrames);
 
    // Check if this is an empty object (complete immediately)
-   if (sst_rx.u32_totalFrames == 0U)
+   if (sst_BLK_rxSession.u32_totalFrames == 0U)
    {
       sv_RxComplete();
       return;
    }
 
    sv_RxSendAck();
-   k_timer_start(&sst_rxIdleTimer, K_MSEC(BLK_RX_IDLE_TIMEOUT_MS), K_NO_WAIT);
+   k_timer_start(&sst_BLK_rxIdleTimer, K_MSEC(BLK_RX_IDLE_TIMEOUT_MS), K_NO_WAIT);
 }
 
 /**
@@ -1215,21 +1228,23 @@ static void sv_RxOnData(const BlkFrame_T *stpt_frame)
    uint8_t u8_ackEvery = 0U;
 
    // Check if the frame belongs to the active incoming transfer
-   if (!sst_rx.b_active || (stpt_frame->u_body.st_data.u8_xferId != sst_rx.u8_xferId))
+   if (!sst_BLK_rxSession.b_active
+      || (stpt_frame->u_body.st_data.u8_xferId != sst_BLK_rxSession.u8_xferId))
    {
       return;
    }
 
-   k_timer_start(&sst_rxIdleTimer, K_MSEC(BLK_RX_IDLE_TIMEOUT_MS), K_NO_WAIT);
-   u8_diff = (uint8_t)(stpt_frame->u_body.st_data.u8_seq - (uint8_t)sst_rx.u32_nextAbs);
+   k_timer_start(&sst_BLK_rxIdleTimer, K_MSEC(BLK_RX_IDLE_TIMEOUT_MS), K_NO_WAIT);
+   u8_diff = (uint8_t)(stpt_frame->u_body.st_data.u8_seq
+      - (uint8_t)sst_BLK_rxSession.u32_nextAbsFrame);
 
    // Check if the frame is behind (a retransmitted duplicate)
    if (u8_diff >= BLK_SEQ_HALF_RANGE)
    {
       // Re-ACK soon so that the sender moves forward again
-      if (k_timer_remaining_get(&sst_rxAckTimer) == 0U)
+      if (k_timer_remaining_get(&sst_BLK_rxAckTimer) == 0U)
       {
-         k_timer_start(&sst_rxAckTimer, K_MSEC(BLK_RX_ACK_DELAY_MS), K_NO_WAIT);
+         k_timer_start(&sst_BLK_rxAckTimer, K_MSEC(BLK_RX_ACK_DELAY_MS), K_NO_WAIT);
       }
       return;
    }
@@ -1238,60 +1253,61 @@ static void sv_RxOnData(const BlkFrame_T *stpt_frame)
    if (u8_diff != 0U)
    {
       // Check if the gap was already reported
-      if (!sst_rx.b_nackSent)
+      if (!sst_BLK_rxSession.b_nackSent)
       {
-         u16_len = gu16_BLK_EncodeNack(u8ar_frame, sizeof(u8ar_frame), sst_rx.u8_xferId,
-            (uint8_t)sst_rx.u32_nextAbs, eBS_OUT_OF_ORDER);
+         u16_len = gu16_BLK_EncodeNack(u8ar_frame, sizeof(u8ar_frame), sst_BLK_rxSession.u8_xferId,
+            (uint8_t)sst_BLK_rxSession.u32_nextAbsFrame, eBS_OUT_OF_ORDER);
          (void)si_SendCtrl(u8ar_frame, u16_len);
-         sst_rx.b_nackSent = true;
+         sst_BLK_rxSession.b_nackSent = true;
       }
       return;
    }
 
-   u32_offset = sst_rx.u32_nextAbs * sst_rx.u8_chunkSize;
-   u32_expLen = MIN((uint32_t)sst_rx.u8_chunkSize, sst_rx.u32_totalLen - u32_offset);
+   u32_offset = sst_BLK_rxSession.u32_nextAbsFrame * sst_BLK_rxSession.u8_chunkSize;
+   u32_expLen = MIN((uint32_t)sst_BLK_rxSession.u8_chunkSize,
+      sst_BLK_rxSession.u32_totalLen - u32_offset);
 
    // Check if the chunk has the size implied by START
    if (stpt_frame->u_body.st_data.u8_dataLen != u32_expLen)
    {
-      APP_LOG_ERR("RX transfer %u: frame %u has %u bytes, expected %u", sst_rx.u8_xferId,
-         sst_rx.u32_nextAbs, stpt_frame->u_body.st_data.u8_dataLen, u32_expLen);
+      APP_LOG_ERR("RX transfer %u: frame %u has %u bytes, expected %u", sst_BLK_rxSession.u8_xferId,
+         sst_BLK_rxSession.u32_nextAbsFrame, stpt_frame->u_body.st_data.u8_dataLen, u32_expLen);
       sv_RxAbort(eBS_PROTOCOL_ERROR);
       return;
    }
 
    // Check if the application's sink accepted the chunk
-   if (sst_cfg.fpt_onRxData(sst_rx.u8_appType, u32_offset,
+   if (sst_BLK_cfg.fpt_onRxData(sst_BLK_rxSession.u8_appType, u32_offset,
       stpt_frame->u_body.st_data.u8pt_data, stpt_frame->u_body.st_data.u8_dataLen) != 0)
    {
       sv_RxAbort(eBS_SINK_ERROR);
       return;
    }
 
-   sst_rx.u32_crc32 = crc32_ieee_update(sst_rx.u32_crc32,
+   sst_BLK_rxSession.u32_crc32 = crc32_ieee_update(sst_BLK_rxSession.u32_crc32,
       stpt_frame->u_body.st_data.u8pt_data, stpt_frame->u_body.st_data.u8_dataLen);
-   sst_rx.u32_nextAbs++;
-   sst_rx.u8_sinceAck++;
-   sst_rx.b_nackSent = false;
+   sst_BLK_rxSession.u32_nextAbsFrame++;
+   sst_BLK_rxSession.u8_sinceAck++;
+   sst_BLK_rxSession.b_nackSent = false;
 
    // Check if this was the last frame (END replaces the final ACK)
-   if (sst_rx.u32_nextAbs == sst_rx.u32_totalFrames)
+   if (sst_BLK_rxSession.u32_nextAbsFrame == sst_BLK_rxSession.u32_totalFrames)
    {
       sv_RxComplete();
       return;
    }
 
-   u8_ackEvery = MAX(sst_rx.u8_window / 2U, 1U);
+   u8_ackEvery = MAX(sst_BLK_rxSession.u8_window / 2U, 1U);
 
    // Check if half a window arrived since the last ACK
-   if (sst_rx.u8_sinceAck >= u8_ackEvery)
+   if (sst_BLK_rxSession.u8_sinceAck >= u8_ackEvery)
    {
       sv_RxSendAck();
    }
    // Otherwise make sure a delayed ACK is scheduled
-   else if (k_timer_remaining_get(&sst_rxAckTimer) == 0U)
+   else if (k_timer_remaining_get(&sst_BLK_rxAckTimer) == 0U)
    {
-      k_timer_start(&sst_rxAckTimer, K_MSEC(BLK_RX_ACK_DELAY_MS), K_NO_WAIT);
+      k_timer_start(&sst_BLK_rxAckTimer, K_MSEC(BLK_RX_ACK_DELAY_MS), K_NO_WAIT);
    }
 }
 
@@ -1350,21 +1366,21 @@ int gi_BLK_Init(const BlkCfg_T *stpt_cfg)
       return -EINVAL;
    }
 
-   (void)k_mutex_lock(&sst_lock, K_FOREVER);
+   (void)k_mutex_lock(&sst_BLK_lock, K_FOREVER);
 
    // Check if the framework is already running
-   if (sb_initialized)
+   if (sb_BLK_initialized)
    {
-      k_mutex_unlock(&sst_lock);
+      k_mutex_unlock(&sst_BLK_lock);
       return -EALREADY;
    }
 
-   sst_cfg = *stpt_cfg;
-   (void)memset(&sst_tx, 0, sizeof(sst_tx));
-   (void)memset(&sst_rx, 0, sizeof(sst_rx));
-   (void)memset(&sst_pending, 0, sizeof(sst_pending));
-   sb_initialized = true;
-   k_mutex_unlock(&sst_lock);
+   sst_BLK_cfg = *stpt_cfg;
+   (void)memset(&sst_BLK_txSession, 0, sizeof(sst_BLK_txSession));
+   (void)memset(&sst_BLK_rxSession, 0, sizeof(sst_BLK_rxSession));
+   (void)memset(&sst_BLK_pendingDone, 0, sizeof(sst_BLK_pendingDone));
+   sb_BLK_initialized = true;
+   k_mutex_unlock(&sst_BLK_lock);
 
    k_thread_start(gt_blkThread);
 
@@ -1382,21 +1398,21 @@ void gv_BLK_OnConnected(struct bt_conn *stpt_conn)
 {
    bool b_tune = false;
 
-   (void)k_mutex_lock(&sst_lock, K_FOREVER);
+   (void)k_mutex_lock(&sst_BLK_lock, K_FOREVER);
 
    // Check if the framework is ready and not already serving a connection
-   if (!sb_initialized || (sstpt_conn != NULL))
+   if (!sb_BLK_initialized || (sstpt_BLK_conn != NULL))
    {
-      k_mutex_unlock(&sst_lock);
+      k_mutex_unlock(&sst_BLK_lock);
       APP_LOG_WRN("ignored (not initialised or a connection is already bound)");
       return;
    }
 
-   sstpt_conn = bt_conn_ref(stpt_conn);
-   (void)atomic_inc(&sat_connGen);
-   (void)atomic_ptr_set(&sapt_hookConn, stpt_conn);
-   b_tune = sst_cfg.b_autoTuneLink;
-   k_mutex_unlock(&sst_lock);
+   sstpt_BLK_conn = bt_conn_ref(stpt_conn);
+   (void)atomic_inc(&st_BLK_connGen);
+   (void)atomic_ptr_set(&st_BLK_hookConn, stpt_conn);
+   b_tune = sst_BLK_cfg.b_autoTuneLink;
+   k_mutex_unlock(&sst_BLK_lock);
 
    // Check if the framework should request throughput-oriented link settings
    if (b_tune)
@@ -1408,9 +1424,9 @@ void gv_BLK_OnConnected(struct bt_conn *stpt_conn)
       (void)bt_conn_le_data_len_update(stpt_conn, BT_LE_DATA_LEN_PARAM_MAX);
 #endif
 #if defined(CONFIG_BT_GATT_CLIENT)
-      static struct bt_gatt_exchange_params slst_mtuParams = { .func = sv_MtuExchanged };
+      static struct bt_gatt_exchange_params slst_BLK_mtuParams = { .func = sv_MtuExchanged };
 
-      (void)bt_gatt_exchange_mtu(stpt_conn, &slst_mtuParams);
+      (void)bt_gatt_exchange_mtu(stpt_conn, &slst_BLK_mtuParams);
 #endif
    }
 }
@@ -1425,46 +1441,46 @@ void gv_BLK_OnConnected(struct bt_conn *stpt_conn)
  */
 void gv_BLK_OnDisconnected(struct bt_conn *stpt_conn)
 {
-   (void)k_mutex_lock(&sst_lock, K_FOREVER);
+   (void)k_mutex_lock(&sst_BLK_lock, K_FOREVER);
 
    // Check if this is the connection the framework is bound to
-   if (stpt_conn != sstpt_conn)
+   if (stpt_conn != sstpt_BLK_conn)
    {
-      k_mutex_unlock(&sst_lock);
+      k_mutex_unlock(&sst_BLK_lock);
       return;
    }
 
-   (void)atomic_ptr_set(&sapt_hookConn, NULL);
-   (void)atomic_inc(&sat_connGen);
-   atomic_clear(&sat_events);
-   k_timer_stop(&sst_txAckTimer);
-   k_timer_stop(&sst_txRetryTimer);
-   k_timer_stop(&sst_rxAckTimer);
-   k_timer_stop(&sst_rxIdleTimer);
+   (void)atomic_ptr_set(&st_BLK_hookConn, NULL);
+   (void)atomic_inc(&st_BLK_connGen);
+   atomic_clear(&st_BLK_events);
+   k_timer_stop(&sst_BLK_txAckTimer);
+   k_timer_stop(&sst_BLK_txRetryTimer);
+   k_timer_stop(&sst_BLK_rxAckTimer);
+   k_timer_stop(&sst_BLK_rxIdleTimer);
 
    // Check if an outgoing transfer was running
-   if (sst_tx.e_state != eBTS_IDLE)
+   if (sst_BLK_txSession.e_state != eBTS_IDLE)
    {
-      sst_pending.b_txPending = true;
-      sst_pending.u8_txAppType = sst_tx.u8_appType;
-      sst_tx.e_state = eBTS_IDLE;
+      sst_BLK_pendingDone.b_txPending = true;
+      sst_BLK_pendingDone.u8_txAppType = sst_BLK_txSession.u8_appType;
+      sst_BLK_txSession.e_state = eBTS_IDLE;
    }
 
    // Check if an incoming transfer was running
-   if (sst_rx.b_active)
+   if (sst_BLK_rxSession.b_active)
    {
-      sst_pending.b_rxPending = true;
-      sst_pending.u8_rxAppType = sst_rx.u8_appType;
-      sst_pending.u32_rxTotalLen = sst_rx.u32_totalLen;
-      sst_rx.b_active = false;
+      sst_BLK_pendingDone.b_rxPending = true;
+      sst_BLK_pendingDone.u8_rxAppType = sst_BLK_rxSession.u8_appType;
+      sst_BLK_pendingDone.u32_rxTotalLen = sst_BLK_rxSession.u32_totalLen;
+      sst_BLK_rxSession.b_active = false;
    }
 
    // Notifications lost with the link never complete: restore all credits
    sv_ResetCredits();
 
-   bt_conn_unref(sstpt_conn);
-   sstpt_conn = NULL;
-   k_mutex_unlock(&sst_lock);
+   bt_conn_unref(sstpt_BLK_conn);
+   sstpt_BLK_conn = NULL;
+   k_mutex_unlock(&sst_BLK_lock);
 
    sv_Kick();
 }
@@ -1496,7 +1512,7 @@ int gi_BLK_Send(uint8_t u8_appType, const BlkSource_T *stpt_source,
    int i_ret = 0;
 
    // Check if the framework is running and the arguments are valid
-   if (!sb_initialized)
+   if (!sb_BLK_initialized)
    {
       return -EPERM;
    }
@@ -1526,26 +1542,26 @@ int gi_BLK_Send(uint8_t u8_appType, const BlkSource_T *stpt_source,
    /* ------------------------------------------------------------------ */
    /* 2. Set up the session and let the engine send START.               */
    /* ------------------------------------------------------------------ */
-   (void)k_mutex_lock(&sst_lock, K_FOREVER);
+   (void)k_mutex_lock(&sst_BLK_lock, K_FOREVER);
 
    // Check if there is a connection
-   if (sstpt_conn == NULL)
+   if (sstpt_BLK_conn == NULL)
    {
       i_ret = -ENOTCONN;
    }
    // Check if the previous transfer has finished
-   else if (sst_tx.e_state != eBTS_IDLE)
+   else if (sst_BLK_txSession.e_state != eBTS_IDLE)
    {
       i_ret = -EBUSY;
    }
    // Check if the central listens to the TX characteristic
-   else if (!bt_gatt_is_subscribed(sstpt_conn, sst_cfg.stpt_txAttr, BT_GATT_CCC_NOTIFY))
+   else if (!bt_gatt_is_subscribed(sstpt_BLK_conn, sst_BLK_cfg.stpt_txAttr, BT_GATT_CCC_NOTIFY))
    {
       i_ret = -EACCES;
    }
    else
    {
-      u16_frameCap = su16_FrameCapacity(sstpt_conn);
+      u16_frameCap = su16_FrameCapacity(sstpt_BLK_conn);
 
       // Check if the MTU leaves room for at least one data byte per frame
       if (u16_frameCap < BLK_MIN_FRAME_LEN)
@@ -1557,22 +1573,23 @@ int gi_BLK_Send(uint8_t u8_appType, const BlkSource_T *stpt_source,
    // Check if all preconditions were met
    if (i_ret == 0)
    {
-      (void)memset(&sst_tx, 0, sizeof(sst_tx));
-      sst_tx.u8_xferId = ++su8_txXferCounter;
-      sst_tx.u8_appType = u8_appType;
-      sst_tx.u8_chunkSize = (uint8_t)(u16_frameCap - BLK_DATA_HDR_LEN);
-      sst_tx.u8_window = BLK_WINDOW_DEFAULT;
-      sst_tx.u32_totalLen = u32_totalLen;
-      sst_tx.u32_crc32 = u32_crc;
-      sst_tx.u32_totalFrames = su32_FrameCount(u32_totalLen, sst_tx.u8_chunkSize);
-      sst_tx.st_source = *stpt_source;
-      sst_tx.e_state = eBTS_START_PENDING;
+      (void)memset(&sst_BLK_txSession, 0, sizeof(sst_BLK_txSession));
+      sst_BLK_txSession.u8_xferId = ++su8_BLK_txXferCounter;
+      sst_BLK_txSession.u8_appType = u8_appType;
+      sst_BLK_txSession.u8_chunkSize = (uint8_t)(u16_frameCap - BLK_DATA_HDR_LEN);
+      sst_BLK_txSession.u8_window = BLK_WINDOW_DEFAULT;
+      sst_BLK_txSession.u32_totalLen = u32_totalLen;
+      sst_BLK_txSession.u32_crc32 = u32_crc;
+      sst_BLK_txSession.u32_totalFrames = su32_FrameCount(u32_totalLen,
+         sst_BLK_txSession.u8_chunkSize);
+      sst_BLK_txSession.st_source = *stpt_source;
+      sst_BLK_txSession.e_state = eBTS_START_PENDING;
 
-      APP_LOG_INF("TX transfer %u: type 0x%02x, %u bytes, %u B/frame", sst_tx.u8_xferId,
-         u8_appType, u32_totalLen, sst_tx.u8_chunkSize);
+      APP_LOG_INF("TX transfer %u: type 0x%02x, %u bytes, %u B/frame", sst_BLK_txSession.u8_xferId,
+         u8_appType, u32_totalLen, sst_BLK_txSession.u8_chunkSize);
    }
 
-   k_mutex_unlock(&sst_lock);
+   k_mutex_unlock(&sst_BLK_lock);
 
    // Check if the engine has work to do
    if (i_ret == 0)
@@ -1629,7 +1646,7 @@ int gi_BLK_SendShort(uint8_t u8_appType, const void *vpt_data, uint8_t u8_len,
    int i_ret = 0;
 
    // Check if the framework is running and the arguments are valid
-   if (!sb_initialized)
+   if (!sb_BLK_initialized)
    {
       return -EPERM;
    }
@@ -1638,27 +1655,27 @@ int gi_BLK_SendShort(uint8_t u8_appType, const void *vpt_data, uint8_t u8_len,
       return -EINVAL;
    }
 
-   (void)k_mutex_lock(&sst_lock, K_FOREVER);
+   (void)k_mutex_lock(&sst_BLK_lock, K_FOREVER);
 
    // Check if there is a subscribed connection with a large enough MTU
-   if (sstpt_conn == NULL)
+   if (sstpt_BLK_conn == NULL)
    {
       i_ret = -ENOTCONN;
    }
-   else if (!bt_gatt_is_subscribed(sstpt_conn, sst_cfg.stpt_txAttr, BT_GATT_CCC_NOTIFY))
+   else if (!bt_gatt_is_subscribed(sstpt_BLK_conn, sst_BLK_cfg.stpt_txAttr, BT_GATT_CCC_NOTIFY))
    {
       i_ret = -EACCES;
    }
-   else if (((uint16_t)u8_len + BLK_FRAME_HDR_LEN) > su16_FrameCapacity(sstpt_conn))
+   else if (((uint16_t)u8_len + BLK_FRAME_HDR_LEN) > su16_FrameCapacity(sstpt_BLK_conn))
    {
       i_ret = -EMSGSIZE;
    }
    else
    {
-      stpt_conn = bt_conn_ref(sstpt_conn);
+      stpt_conn = bt_conn_ref(sstpt_BLK_conn);
    }
 
-   k_mutex_unlock(&sst_lock);
+   k_mutex_unlock(&sst_BLK_lock);
 
    // Check if the preconditions failed
    if (i_ret != 0)
@@ -1670,7 +1687,7 @@ int gi_BLK_SendShort(uint8_t u8_appType, const void *vpt_data, uint8_t u8_len,
       (const uint8_t *)vpt_data, u8_len);
 
    // Wait for a TX credit outside the lock so the engine keeps running
-   if (k_sem_take(&sst_txCredits, t_timeout) != 0)
+   if (k_sem_take(&sst_BLK_txCredits, t_timeout) != 0)
    {
       i_ret = -EAGAIN;
    }
@@ -1692,7 +1709,7 @@ int gi_BLK_SendShort(uint8_t u8_appType, const void *vpt_data, uint8_t u8_len,
  */
 void gv_BLK_AbortTx(void)
 {
-   atomic_set_bit(&sat_events, eBE_TX_ABORT_REQ);
+   atomic_set_bit(&st_BLK_events, eBE_TX_ABORT_REQ);
    sv_Kick();
 }
 
@@ -1704,7 +1721,7 @@ void gv_BLK_AbortTx(void)
  */
 void gv_BLK_AbortRx(void)
 {
-   atomic_set_bit(&sat_events, eBE_RX_ABORT_REQ);
+   atomic_set_bit(&st_BLK_events, eBE_RX_ABORT_REQ);
    sv_Kick();
 }
 
@@ -1717,9 +1734,9 @@ bool gb_BLK_IsTxBusy(void)
 {
    bool b_busy = false;
 
-   (void)k_mutex_lock(&sst_lock, K_FOREVER);
-   b_busy = (sst_tx.e_state != eBTS_IDLE);
-   k_mutex_unlock(&sst_lock);
+   (void)k_mutex_lock(&sst_BLK_lock, K_FOREVER);
+   b_busy = (sst_BLK_txSession.e_state != eBTS_IDLE);
+   k_mutex_unlock(&sst_BLK_lock);
 
    return b_busy;
 }
@@ -1734,16 +1751,16 @@ uint16_t gu16_BLK_GetMaxShortPayload(void)
 {
    uint16_t u16_cap = 0U;
 
-   (void)k_mutex_lock(&sst_lock, K_FOREVER);
+   (void)k_mutex_lock(&sst_BLK_lock, K_FOREVER);
 
    // Check if there is a connection to size against
-   if (sstpt_conn != NULL)
+   if (sstpt_BLK_conn != NULL)
    {
-      u16_cap = su16_FrameCapacity(sstpt_conn);
+      u16_cap = su16_FrameCapacity(sstpt_BLK_conn);
       u16_cap = (u16_cap > BLK_FRAME_HDR_LEN) ? (uint16_t)(u16_cap - BLK_FRAME_HDR_LEN) : 0U;
    }
 
-   k_mutex_unlock(&sst_lock);
+   k_mutex_unlock(&sst_BLK_lock);
 
    return u16_cap;
 }
@@ -1804,7 +1821,7 @@ ssize_t gt_BLK_RxWriteHook(struct bt_conn *stpt_connHandle,
    }
 
    // Check if the write comes from the bound connection
-   if (!sb_initialized || (stpt_connHandle != atomic_ptr_get(&sapt_hookConn)))
+   if (!sb_BLK_initialized || (stpt_connHandle != atomic_ptr_get(&st_BLK_hookConn)))
    {
       return 0;
    }
@@ -1817,17 +1834,17 @@ ssize_t gt_BLK_RxWriteHook(struct bt_conn *stpt_connHandle,
    }
 
    // Check if a queue block is free; otherwise let the engine NACK
-   if (k_mem_slab_alloc(&sst_rxSlab, (void **)&stpt_blk, K_NO_WAIT) != 0)
+   if (k_mem_slab_alloc(&sst_BLK_rxSlab, (void **)&stpt_blk, K_NO_WAIT) != 0)
    {
-      atomic_set_bit(&sat_events, eBE_RX_OVERFLOW);
+      atomic_set_bit(&st_BLK_events, eBE_RX_OVERFLOW);
       sv_Kick();
       return BT_GATT_ERR(BT_ATT_ERR_INSUFFICIENT_RESOURCES);
    }
 
-   stpt_blk->t_connGen = atomic_get(&sat_connGen);
+   stpt_blk->t_connGen = atomic_get(&st_BLK_connGen);
    stpt_blk->u16_len = u16_length;
    (void)memcpy(stpt_blk->u8ar_data, u8pt_buf, u16_length);
-   k_fifo_put(&sst_rxFifo, stpt_blk);
+   k_fifo_put(&sst_BLK_rxFifo, stpt_blk);
    sv_Kick();
 
    return 0;

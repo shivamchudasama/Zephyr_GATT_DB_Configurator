@@ -54,6 +54,10 @@
 #endif
 #define CLAMP(v, lo, hi)      MIN(MAX((v), (lo)), (hi))
 #define ARRAY_SIZE(a)         (sizeof(a) / sizeof((a)[0]))
+/* C89-compatible stand-in for Zephyr's BUILD_ASSERT (no _Static_assert). */
+#define SHIM_CAT_(a, b)       a##b
+#define SHIM_CAT(a, b)        SHIM_CAT_(a, b)
+#define BUILD_ASSERT(c, ...)  typedef char SHIM_CAT(shim_build_assert_, __LINE__)[(c) ? 1 : -1]
 
 /* ---- Time ---------------------------------------------------------------- */
 typedef struct { int64_t ms; } k_timeout_t;

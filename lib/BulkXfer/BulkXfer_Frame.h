@@ -216,21 +216,23 @@ typedef struct
 
    union
    {
+      /* Members are ordered by alignment (widest first) to avoid padding,
+       * not in wire order. Access them by name only. */
       struct
       {
+         uint32_t u32_totalLen;
+         uint32_t u32_crc32;
          uint8_t u8_xferId;
          uint8_t u8_appType;
-         uint32_t u32_totalLen;
          uint8_t u8_chunkSize;
          uint8_t u8_window;
-         uint32_t u32_crc32;
       } st_start;
 
       struct
       {
+         const uint8_t *u8pt_data;
          uint8_t u8_xferId;
          uint8_t u8_seq;
-         const uint8_t *u8pt_data;
          uint8_t u8_dataLen;
       } st_data;
 
