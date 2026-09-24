@@ -152,17 +152,17 @@
 typedef enum
 {
    /** xferId(1) appType(1) totalLen(4) chunkSize(1) window(1) crc32(4) */
-   eBFT_START = 0xF0,
+   eBFT_START = 0xF0,                        /**< START frame */
    /** xferId(1) seq(1) data(1..chunkSize) */
-   eBFT_DATA  = 0xF1,
+   eBFT_DATA  = 0xF1,                        /**< DATA frame */
    /** xferId(1) nextExpectedSeq(1) window(1) - cumulative acknowledgement */
-   eBFT_ACK   = 0xF2,
+   eBFT_ACK   = 0xF2,                        /**< ACK frame */
    /** xferId(1) nextExpectedSeq(1) reason(1) - go back to nextExpectedSeq */
-   eBFT_NACK  = 0xF3,
+   eBFT_NACK  = 0xF3,                        /**< NACK frame */
    /** xferId(1) status(1) - final result, sent by the receiver */
-   eBFT_END   = 0xF4,
+   eBFT_END   = 0xF4,                        /**< END frame */
    /** xferId(1) reason(1) direction(1) */
-   eBFT_ABORT = 0xF5,
+   eBFT_ABORT = 0xF5,                        /**< ABORT frame (direction distinguishes sender / receiver) */
 } BlkFrameType_E;
 
 /**
@@ -172,18 +172,18 @@ typedef enum
  */
 typedef enum
 {
-   eBS_OK              = 0x00, /**< Transfer complete, CRC matched.   */
-   eBS_CRC_ERROR       = 0x01, /**< All data received, CRC mismatch.  */
-   eBS_TIMEOUT         = 0x02, /**< Peer stopped responding.          */
-   eBS_ABORTED         = 0x03, /**< Aborted by the local application. */
-   eBS_REMOTE_ABORTED  = 0x04, /**< Aborted by the peer.              */
-   eBS_REJECTED        = 0x05, /**< Receiver refused the transfer.    */
-   eBS_DISCONNECTED    = 0x06, /**< Link lost during the transfer.    */
-   eBS_SOURCE_ERROR    = 0x07, /**< Sender's data source failed.      */
-   eBS_SINK_ERROR      = 0x08, /**< Receiver's data sink failed.      */
-   eBS_PROTOCOL_ERROR  = 0x09, /**< Malformed / unexpected frame.     */
-   eBS_NO_RESOURCES    = 0x0A, /**< RX queue overflow (NACK reason).  */
-   eBS_OUT_OF_ORDER    = 0x0B, /**< Sequence gap (NACK reason).       */
+   eBS_OK              = 0x00,               /**< Transfer complete, CRC matched.   */
+   eBS_CRC_ERROR       = 0x01,               /**< All data received, CRC mismatch.  */
+   eBS_TIMEOUT         = 0x02,               /**< Peer stopped responding.          */
+   eBS_ABORTED         = 0x03,               /**< Aborted by the local application. */
+   eBS_REMOTE_ABORTED  = 0x04,               /**< Aborted by the peer.              */
+   eBS_REJECTED        = 0x05,               /**< Receiver refused the transfer.    */
+   eBS_DISCONNECTED    = 0x06,               /**< Link lost during the transfer.    */
+   eBS_SOURCE_ERROR    = 0x07,               /**< Sender's data source failed.      */
+   eBS_SINK_ERROR      = 0x08,               /**< Receiver's data sink failed.      */
+   eBS_PROTOCOL_ERROR  = 0x09,               /**< Malformed / unexpected frame.     */
+   eBS_NO_RESOURCES    = 0x0A,               /**< RX queue overflow (NACK reason).  */
+   eBS_OUT_OF_ORDER    = 0x0B,               /**< Sequence gap (NACK reason).       */
 } BlkStatus_E;
 
 /**
@@ -194,8 +194,8 @@ typedef enum
  */
 typedef enum
 {
-   eBAD_BY_SENDER   = 0x00, /**< Sender cancels its outgoing transfer. */
-   eBAD_BY_RECEIVER = 0x01, /**< Receiver cancels an incoming transfer.*/
+   eBAD_BY_SENDER   = 0x00,                  /**< Sender cancels its outgoing transfer. */
+   eBAD_BY_RECEIVER = 0x01,                  /**< Receiver cancels an incoming transfer.*/
 } BlkAbortDir_E;
 
 /******************************************************************************/
@@ -210,9 +210,9 @@ typedef enum
  */
 typedef struct
 {
-   uint8_t u8_type;                 /**< Frame type (app type or BlkFrameType_E). */
-   uint8_t u8_payloadLen;           /**< Payload length (the len byte).           */
-   const uint8_t *u8pt_payload;     /**< Payload (short app frames).              */
+   uint8_t u8_type;                          /**< Frame type (app type or BlkFrameType_E). */
+   uint8_t u8_payloadLen;                    /**< Payload length (the len byte).           */
+   const uint8_t *u8pt_payload;              /**< Payload (short app frames).              */
 
    union
    {
@@ -220,49 +220,49 @@ typedef struct
        * not in wire order. Access them by name only. */
       struct
       {
-         uint32_t u32_totalLen;
-         uint32_t u32_crc32;
-         uint8_t u8_xferId;
-         uint8_t u8_appType;
-         uint8_t u8_chunkSize;
-         uint8_t u8_window;
-      } st_start;
+         uint32_t u32_totalLen;              /**< Total bytes in the transfer.             */
+         uint32_t u32_crc32;                 /**< CRC-32 over the complete data.           */
+         uint8_t u8_xferId;                  /**< Transfer ID chosen by the sender.        */
+         uint8_t u8_appType;                 /**< Application type of the assembled data.  */
+         uint8_t u8_chunkSize;               /**< Max data bytes per DATA frame.           */
+         uint8_t u8_window;                  /**< Sender's proposed window (frames).       */
+      } st_start;                            /**< eBFT_START fields.                       */
 
       struct
       {
-         const uint8_t *u8pt_data;
-         uint8_t u8_xferId;
-         uint8_t u8_seq;
-         uint8_t u8_dataLen;
-      } st_data;
+         const uint8_t *u8pt_data;           /**< Chunk data (points into the rx buffer).  */
+         uint8_t u8_xferId;                  /**< Transfer ID.                             */
+         uint8_t u8_seq;                     /**< Sequence number of this chunk.           */
+         uint8_t u8_dataLen;                 /**< Chunk length in bytes.                   */
+      } st_data;                             /**< eBFT_DATA fields.                        */
 
       struct
       {
-         uint8_t u8_xferId;
-         uint8_t u8_seq;
-         uint8_t u8_window;
-      } st_ack;
+         uint8_t u8_xferId;                  /**< Transfer ID.                             */
+         uint8_t u8_seq;                     /**< Next expected seq (cumulative ACK).      */
+         uint8_t u8_window;                  /**< Receiver's granted window (frames).      */
+      } st_ack;                              /**< eBFT_ACK fields.                         */
 
       struct
       {
-         uint8_t u8_xferId;
-         uint8_t u8_seq;
-         uint8_t u8_reason;
-      } st_nack;
+         uint8_t u8_xferId;                  /**< Transfer ID.                             */
+         uint8_t u8_seq;                     /**< Next expected seq; resend from here.     */
+         uint8_t u8_reason;                  /**< Reason (BlkStatus_E).                    */
+      } st_nack;                             /**< eBFT_NACK fields.                        */
 
       struct
       {
-         uint8_t u8_xferId;
-         uint8_t u8_status;
-      } st_end;
+         uint8_t u8_xferId;                  /**< Transfer ID.                             */
+         uint8_t u8_status;                  /**< Final result (BlkStatus_E).              */
+      } st_end;                              /**< eBFT_END fields.                         */
 
       struct
       {
-         uint8_t u8_xferId;
-         uint8_t u8_reason;
-         uint8_t u8_dir;
-      } st_abort;
-   } u_body;                        /**< Type-specific decoded fields.            */
+         uint8_t u8_xferId;                  /**< Transfer ID.                             */
+         uint8_t u8_reason;                  /**< Reason (BlkStatus_E).                    */
+         uint8_t u8_dir;                     /**< Aborting side (BlkAbortDir_E).           */
+      } st_abort;                            /**< eBFT_ABORT fields.                       */
+   } u_body;                                 /**< Type-specific decoded fields.            */
 } BlkFrame_T;
 
 /******************************************************************************/

@@ -286,6 +286,15 @@ int gi_BLK_FrameParse(const uint8_t *u8pt_buf, uint16_t u16_len,
 /**
  * @public        gu16_BLK_EncodeShort
  * @brief         Build a single-frame application message [len][appType][data].
+ *
+ *                Frame format (2 + N bytes):
+ *                @verbatim
+ *                Offset  Size  Field
+ *                0       1     len      = N (payload length, 0..255)
+ *                1       1     appType  (0x00..BLK_APP_TYPE_MAX)
+ *                2       N     data
+ *                @endverbatim
+ *
  * @param[out]    u8pt_buf Destination buffer.
  * @param[in]     u16_bufLen Size of u8pt_buf.
  * @param[in]     u8_appType Application type (0x00..BLK_APP_TYPE_MAX).
@@ -320,6 +329,20 @@ uint16_t gu16_BLK_EncodeShort(uint8_t *u8pt_buf, uint16_t u16_bufLen,
 /**
  * @public        gu16_BLK_EncodeStart
  * @brief         Build a START frame announcing a multi-frame transfer.
+ *
+ *                Frame format (14 bytes, multi-byte fields little-endian):
+ *                @verbatim
+ *                Offset  Size  Field
+ *                0       1     len        = 12 (BLK_START_PAYLOAD_LEN)
+ *                1       1     type       = 0xF0 (eBFT_START)
+ *                2       1     xferId
+ *                3       1     appType
+ *                4       4     totalLen
+ *                8       1     chunkSize
+ *                9       1     window
+ *                10      4     crc32
+ *                @endverbatim
+ *
  * @param[out]    u8pt_buf Destination buffer.
  * @param[in]     u16_bufLen Size of u8pt_buf.
  * @param[in]     u8_xferId Transfer identifier chosen by the sender.
@@ -359,6 +382,17 @@ uint16_t gu16_BLK_EncodeStart(uint8_t *u8pt_buf, uint16_t u16_bufLen,
  * @brief         Write the 4-byte DATA frame header. The caller places the
  *                data bytes directly at u8pt_buf + BLK_DATA_HDR_LEN, so the
  *                source can be read in place without an extra copy.
+ *
+ *                Frame format (4 + N bytes):
+ *                @verbatim
+ *                Offset  Size  Field
+ *                0       1     len     = N + 2 (xferId + seq + data)
+ *                1       1     type    = 0xF1 (eBFT_DATA)
+ *                2       1     xferId
+ *                3       1     seq
+ *                4       N     data    (1..253 bytes, written by the caller)
+ *                @endverbatim
+ *
  * @param[out]    u8pt_buf Destination buffer.
  * @param[in]     u16_bufLen Size of u8pt_buf (must fit header + data).
  * @param[in]     u8_xferId Transfer identifier.
@@ -390,6 +424,17 @@ uint16_t gu16_BLK_EncodeDataHeader(uint8_t *u8pt_buf, uint16_t u16_bufLen,
 /**
  * @public        gu16_BLK_EncodeAck
  * @brief         Build a cumulative ACK: every frame before u8_seq was received.
+ *
+ *                Frame format (5 bytes):
+ *                @verbatim
+ *                Offset  Size  Field
+ *                0       1     len      = 3 (BLK_ACK_PAYLOAD_LEN)
+ *                1       1     type     = 0xF2 (eBFT_ACK)
+ *                2       1     xferId
+ *                3       1     seq      (next expected)
+ *                4       1     window
+ *                @endverbatim
+ *
  * @param[out]    u8pt_buf Destination buffer.
  * @param[in]     u16_bufLen Size of u8pt_buf.
  * @param[in]     u8_xferId Transfer identifier.
@@ -407,6 +452,17 @@ uint16_t gu16_BLK_EncodeAck(uint8_t *u8pt_buf, uint16_t u16_bufLen,
 /**
  * @public        gu16_BLK_EncodeNack
  * @brief         Build a NACK: resend starting from u8_seq (Go-Back-N).
+ *
+ *                Frame format (5 bytes):
+ *                @verbatim
+ *                Offset  Size  Field
+ *                0       1     len      = 3 (BLK_NACK_PAYLOAD_LEN)
+ *                1       1     type     = 0xF3 (eBFT_NACK)
+ *                2       1     xferId
+ *                3       1     seq      (next expected)
+ *                4       1     reason   (BlkStatus_E)
+ *                @endverbatim
+ *
  * @param[out]    u8pt_buf Destination buffer.
  * @param[in]     u16_bufLen Size of u8pt_buf.
  * @param[in]     u8_xferId Transfer identifier.
@@ -424,6 +480,16 @@ uint16_t gu16_BLK_EncodeNack(uint8_t *u8pt_buf, uint16_t u16_bufLen,
 /**
  * @public        gu16_BLK_EncodeEnd
  * @brief         Build an END frame carrying the receiver's final status.
+ *
+ *                Frame format (4 bytes):
+ *                @verbatim
+ *                Offset  Size  Field
+ *                0       1     len      = 2 (BLK_END_PAYLOAD_LEN)
+ *                1       1     type     = 0xF4 (eBFT_END)
+ *                2       1     xferId
+ *                3       1     status   (BlkStatus_E)
+ *                @endverbatim
+ *
  * @param[out]    u8pt_buf Destination buffer.
  * @param[in]     u16_bufLen Size of u8pt_buf.
  * @param[in]     u8_xferId Transfer identifier.
@@ -440,6 +506,17 @@ uint16_t gu16_BLK_EncodeEnd(uint8_t *u8pt_buf, uint16_t u16_bufLen,
 /**
  * @public        gu16_BLK_EncodeAbort
  * @brief         Build an ABORT frame.
+ *
+ *                Frame format (5 bytes):
+ *                @verbatim
+ *                Offset  Size  Field
+ *                0       1     len      = 3 (BLK_ABORT_PAYLOAD_LEN)
+ *                1       1     type     = 0xF5 (eBFT_ABORT)
+ *                2       1     xferId
+ *                3       1     reason   (BlkStatus_E)
+ *                4       1     dir      (BlkAbortDir_E)
+ *                @endverbatim
+ *
  * @param[out]    u8pt_buf Destination buffer.
  * @param[in]     u16_bufLen Size of u8pt_buf.
  * @param[in]     u8_xferId Transfer identifier.
