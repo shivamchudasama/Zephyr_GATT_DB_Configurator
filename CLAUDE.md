@@ -26,7 +26,7 @@ If it disagrees with the code, the code wins; fix the reference.
 
 | Library | Purpose | API reference |
 |---|---|---|
-| `lib/BulkXfer` | Reliable bidirectional bulk transfer over BLE GATT (windowed ACK, Go-Back-N, CRC-32) | [lib/BulkXfer/API_REFERENCE.md](lib/BulkXfer/API_REFERENCE.md) |
+| `lib/BulkXfer` | Reliable bulk transfer over BLE GATT: Client role writes DATA (Write Without Response), Server role hosts the service and ACKs via CTRL notify (windowed ACK, Go-Back-N, CRC-32) | [lib/BulkXfer/API_REFERENCE.md](lib/BulkXfer/API_REFERENCE.md) |
 | `lib/GATT_CB` | Generic GATT read/write callbacks used by generated services | *Not written yet*: see `GATT_GenericCallbacks.h`, `GATT_CB_Types.h` |
 | `lib/AppLog` | Logging macros (`APP_LOG_*`) | *Not written yet*: see `AppLog.h` |
 

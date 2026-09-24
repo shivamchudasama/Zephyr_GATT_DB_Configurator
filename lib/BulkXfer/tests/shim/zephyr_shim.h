@@ -1,15 +1,18 @@
 /**
  * @file          zephyr_shim.h
  * @brief         Minimal, single-threaded stand-in for the Zephyr kernel and
- *                Bluetooth APIs used by BulkXfer.c, so that the real engine
- *                can be exercised on a host PC by test_engine.c.
+ *                Bluetooth APIs used by the BulkXfer core, Server and Client,
+ *                so that the real engine can be exercised on a host PC by
+ *                test_engine.c.
  *
  *                - Time is simulated (gi64_simNowMs); timers fire only when
  *                  the test calls gv_SimFireTimers().
  *                - A k_sem_take() that would block calls gv_SimOnBlock() so the
  *                  simulated link can complete notifications and free credits.
- *                - bt_gatt_notify_cb / bt_gatt_is_subscribed / bt_gatt_get_mtu
- *                  are implemented by the test (simulated link and peer).
+ *                - bt_gatt_notify_cb, bt_gatt_write_without_response_cb,
+ *                  bt_gatt_discover, bt_gatt_subscribe, bt_gatt_exchange_mtu,
+ *                  bt_gatt_is_subscribed and bt_gatt_get_mtu are implemented
+ *                  by the test (simulated link and peer).
  *
  * @date          22/09/2026
  * @author        Shivam Chudasama
@@ -190,7 +193,9 @@ static inline bool atomic_test_and_clear_bit(atomic_t *a, int b)
    *a &= ~(1L << b);
    return r;
 }
+static inline void atomic_clear_bit(atomic_t *a, int b) { *a &= ~(1L << b); }
 static inline atomic_val_t atomic_get(const atomic_t *a) { return *a; }
+static inline atomic_val_t atomic_set(atomic_t *a, atomic_val_t v) { atomic_val_t o = *a; *a = v; return o; }
 static inline atomic_val_t atomic_inc(atomic_t *a) { return (*a)++; }
 static inline atomic_val_t atomic_clear(atomic_t *a) { atomic_val_t o = *a; *a = 0; return o; }
 static inline void *atomic_ptr_get(const atomic_ptr_t *p) { return *p; }
@@ -210,9 +215,30 @@ static inline uint32_t crc32_ieee_update(uint32_t crc, const uint8_t *data, size
    return ~crc;
 }
 
-/* ---- Bluetooth ----------------------------------------------------------- */
+/* ---- Bluetooth: UUIDs --------------------------------------------------- */
+#define BT_UUID_TYPE_16                    0
+#define BT_UUID_TYPE_128                   2
+struct bt_uuid { uint8_t type; };
+struct bt_uuid_16 { struct bt_uuid uuid; uint16_t val; };
+struct bt_uuid_128 { struct bt_uuid uuid; uint8_t val[16]; };
+#define BT_UUID_128_ENCODE(w32, w1, w2, w3, w48)    (uint8_t)(w48), (uint8_t)((w48) >> 8), (uint8_t)((w48) >> 16), (uint8_t)((w48) >> 24),    (uint8_t)((w48) >> 32), (uint8_t)((w48) >> 40), (uint8_t)(w3), (uint8_t)((w3) >> 8),    (uint8_t)(w2), (uint8_t)((w2) >> 8), (uint8_t)(w1), (uint8_t)((w1) >> 8),    (uint8_t)(w32), (uint8_t)((w32) >> 8), (uint8_t)((w32) >> 16), (uint8_t)((w32) >> 24)
+#define BT_UUID_INIT_128(...)              { { BT_UUID_TYPE_128 }, { __VA_ARGS__ } }
+#define BT_UUID_DECLARE_16(v)    ((const struct bt_uuid *)(&(const struct bt_uuid_16){ { BT_UUID_TYPE_16 }, (v) }))
+#define BT_UUID_DECLARE_128(...)    ((const struct bt_uuid *)(&(const struct bt_uuid_128){ { BT_UUID_TYPE_128 }, { __VA_ARGS__ } }))
+#define BT_UUID_GATT_CCC                   BT_UUID_DECLARE_16(0x2902)
+static inline int bt_uuid_cmp(const struct bt_uuid *u1, const struct bt_uuid *u2)
+{
+   if (u1->type != u2->type) { return (int)u1->type - (int)u2->type; }
+   if (u1->type == BT_UUID_TYPE_16)
+   {
+      return (int)((const struct bt_uuid_16 *)u1)->val - (int)((const struct bt_uuid_16 *)u2)->val;
+   }
+   return memcmp(((const struct bt_uuid_128 *)u1)->val, ((const struct bt_uuid_128 *)u2)->val, 16);
+}
+
+/* ---- Bluetooth: connection and GATT server ------------------------------- */
 struct bt_conn { int i_id; };
-struct bt_gatt_attr { const void *uuid; void *user_data; };
+struct bt_gatt_attr { const void *uuid; void *user_data; uint16_t handle; };
 typedef void (*bt_gatt_complete_func_t)(struct bt_conn *conn, void *user_data);
 struct bt_gatt_notify_params
 {
@@ -237,5 +263,59 @@ extern int bt_gatt_notify_cb(struct bt_conn *conn, struct bt_gatt_notify_params 
 extern bool bt_gatt_is_subscribed(struct bt_conn *conn, const struct bt_gatt_attr *attr,
    uint16_t ccc_type);
 extern uint16_t bt_gatt_get_mtu(struct bt_conn *conn);
+
+/* ---- Bluetooth: GATT client ---------------------------------------------- */
+#define BT_ATT_FIRST_ATTRIBUTE_HANDLE      0x0001
+#define BT_ATT_LAST_ATTRIBUTE_HANDLE       0xffff
+#define BT_GATT_ITER_STOP                  0
+#define BT_GATT_ITER_CONTINUE              1
+#define BT_GATT_CHRC_WRITE_WITHOUT_RESP    0x04
+#define BT_GATT_CHRC_WRITE                 0x08
+#define BT_GATT_CHRC_NOTIFY                0x10
+#define BT_GATT_SUBSCRIBE_FLAG_VOLATILE    0
+enum
+{
+   BT_GATT_DISCOVER_PRIMARY,
+   BT_GATT_DISCOVER_SECONDARY,
+   BT_GATT_DISCOVER_INCLUDE,
+   BT_GATT_DISCOVER_CHARACTERISTIC,
+   BT_GATT_DISCOVER_DESCRIPTOR,
+};
+struct bt_gatt_service_val { const struct bt_uuid *uuid; uint16_t end_handle; };
+struct bt_gatt_chrc { const struct bt_uuid *uuid; uint16_t value_handle; uint8_t properties; };
+struct bt_gatt_discover_params;
+typedef uint8_t (*bt_gatt_discover_func_t)(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+   struct bt_gatt_discover_params *params);
+struct bt_gatt_discover_params
+{
+   const struct bt_uuid *uuid;
+   bt_gatt_discover_func_t func;
+   uint16_t start_handle;
+   uint16_t end_handle;
+   uint8_t type;
+};
+struct bt_gatt_subscribe_params;
+typedef uint8_t (*bt_gatt_notify_func_t)(struct bt_conn *conn,
+   struct bt_gatt_subscribe_params *params, const void *data, uint16_t length);
+typedef void (*bt_gatt_subscribe_func_t)(struct bt_conn *conn, uint8_t err,
+   struct bt_gatt_subscribe_params *params);
+struct bt_gatt_subscribe_params
+{
+   bt_gatt_notify_func_t notify;
+   bt_gatt_subscribe_func_t subscribe;
+   uint16_t value_handle;
+   uint16_t ccc_handle;
+   uint16_t value;
+   atomic_t flags[1];
+};
+struct bt_gatt_exchange_params
+{
+   void (*func)(struct bt_conn *conn, uint8_t err, struct bt_gatt_exchange_params *params);
+};
+extern int bt_gatt_write_without_response_cb(struct bt_conn *conn, uint16_t handle,
+   const void *data, uint16_t length, bool sign, bt_gatt_complete_func_t func, void *user_data);
+extern int bt_gatt_discover(struct bt_conn *conn, struct bt_gatt_discover_params *params);
+extern int bt_gatt_subscribe(struct bt_conn *conn, struct bt_gatt_subscribe_params *params);
+extern int bt_gatt_exchange_mtu(struct bt_conn *conn, struct bt_gatt_exchange_params *params);
 
 #endif // _ZEPHYR_SHIM_H

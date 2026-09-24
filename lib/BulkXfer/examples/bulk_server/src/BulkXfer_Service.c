@@ -4,14 +4,15 @@
  *                by the GATT configurator in generic-callback mode.
  *
  *                Characteristics:
- *                  RX   (Write | Write Without Response): central -> device
+ *                  DATA (Write | Write Without Response): client -> server
  *                       frames. gt_GATT_GenericWrite + custom write hook that
- *                       forwards to gt_BLK_RxWriteHook().
- *                  TX   (Notify): device -> central frames, sent by BulkXfer
- *                       with bt_gatt_notify_cb(). No read/write callbacks.
+ *                       forwards to gt_BLKS_DataWriteHook().
+ *                  CTRL (Notify): server -> client control frames, sent by
+ *                       BulkXfer with bt_gatt_notify_cb(). No read/write
+ *                       callbacks.
  *                  Caps (Read): BlkCaps_T, served by gt_GATT_GenericRead.
  *
- * @date          22/09/2026
+ * @date          24/09/2026
  * @author        Shivam Chudasama
  * @copyright     Shivam Chudasama
  * @license       MIT
@@ -57,7 +58,7 @@
 /*                       PRIVATE FUNCTION DECLARATIONS                        */
 /*                                                                            */
 /******************************************************************************/
-static ssize_t st_OnBulkRxWrite(struct bt_conn *stpt_connHandle,
+static ssize_t st_OnBulkDataWrite(struct bt_conn *stpt_connHandle,
    const struct bt_gatt_attr *stpt_attr, const void *vpt_buf, uint16_t u16_length,
    uint16_t u16_offset, uint8_t u8_flags);
 
@@ -73,31 +74,31 @@ static ssize_t st_OnBulkRxWrite(struct bt_conn *stpt_connHandle,
 /*                                                                            */
 /******************************************************************************/
 /**
- * @var           su8ar_rxFrame
+ * @var           su8ar_dataFrame
  * @brief         Scratch copy made by gt_GATT_GenericWrite (one full frame).
  */
-static uint8_t su8ar_rxFrame[BLK_MAX_FRAME_LEN];
+static uint8_t su8ar_dataFrame[BLK_MAX_FRAME_LEN];
 
 /**
  * @var           sst_caps
- * @brief         Capability record served to the central.
+ * @brief         Capability record served to the client.
  */
 static BlkCaps_T sst_caps;
 
 /**
- * @var           sst_rxFrameDesc
- * @brief         Descriptor for the 'RX' characteristic. Variable length up to
+ * @var           sst_dataFrameDesc
+ * @brief         Descriptor for the 'DATA' characteristic. Variable length up to
  *                BLK_MAX_FRAME_LEN; the hook passes every frame to BulkXfer.
  *                No mutex: the buffer is only touched in BLE RX context.
  */
-static GATTCharDescriptor_T sst_rxFrameDesc = {
-   .vpt_data          = su8ar_rxFrame,
-   .u16_dataLen       = sizeof(su8ar_rxFrame),
+static GATTCharDescriptor_T sst_dataFrameDesc = {
+   .vpt_data          = su8ar_dataFrame,
+   .u16_dataLen       = sizeof(su8ar_dataFrame),
    .u16_actualLen     = 0U,
    .b_variableLength  = true,
    .stpt_mutex        = NULL,
    .fpt_customReadCb  = NULL,
-   .fpt_customWriteCb = st_OnBulkRxWrite,
+   .fpt_customWriteCb = st_OnBulkDataWrite,
 };
 
 /**
@@ -126,23 +127,23 @@ static GATTCharDescriptor_T sst_capsDesc = {
  *                references.
  */
 BT_GATT_SERVICE_DEFINE(gst_bulkXferSvc,
-   BT_GATT_PRIMARY_SERVICE(BT_UUID_BULK_XFER_SVC),
+   BT_GATT_PRIMARY_SERVICE(BT_UUID_BLK_SVC),
 
-   // RX: central -> device frames
-   BT_GATT_CHARACTERISTIC(BT_UUID_BULK_XFER_RX,
+   // DATA: client -> server frames (bulk data)
+   BT_GATT_CHARACTERISTIC(BT_UUID_BLK_DATA,
       BT_GATT_CHRC_WRITE | BT_GATT_CHRC_WRITE_WITHOUT_RESP,
       BT_GATT_PERM_WRITE,
-      NULL, gt_GATT_GenericWrite, &sst_rxFrameDesc),
+      NULL, gt_GATT_GenericWrite, &sst_dataFrameDesc),
 
-   // TX: device -> central frames
-   BT_GATT_CHARACTERISTIC(BT_UUID_BULK_XFER_TX,
+   // CTRL: server -> client control frames
+   BT_GATT_CHARACTERISTIC(BT_UUID_BLK_CTRL,
       BT_GATT_CHRC_NOTIFY,
       BT_GATT_PERM_NONE,
       NULL, NULL, NULL),
    BT_GATT_CCC(NULL, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 
    // Caps: protocol capabilities
-   BT_GATT_CHARACTERISTIC(BT_UUID_BULK_XFER_CAPS,
+   BT_GATT_CHARACTERISTIC(BT_UUID_BLK_CAPS,
       BT_GATT_CHRC_READ,
       BT_GATT_PERM_READ,
       gt_GATT_GenericRead, NULL, &sst_capsDesc),
@@ -160,22 +161,22 @@ BT_GATT_SERVICE_DEFINE(gst_bulkXferSvc,
 /*                                                                            */
 /******************************************************************************/
 /**
- * @private       st_OnBulkRxWrite
- * @brief         Custom write hook of the RX characteristic (the name entered
- *                in the configurator). Forwards to the BulkXfer engine.
+ * @private       st_OnBulkDataWrite
+ * @brief         Custom write hook of the DATA characteristic (the name
+ *                entered in the configurator). Forwards to the BulkXfer Server.
  * @param[in]     stpt_connHandle Connection that wrote.
- * @param[in]     stpt_attr RX attribute.
+ * @param[in]     stpt_attr DATA attribute.
  * @param[in]     vpt_buf Written bytes (one frame).
  * @param[in]     u16_length Number of bytes.
  * @param[in]     u16_offset Write offset.
  * @param[in]     u8_flags Write flags.
- * @return        Result of gt_BLK_RxWriteHook().
+ * @return        Result of gt_BLKS_DataWriteHook().
  */
-static ssize_t st_OnBulkRxWrite(struct bt_conn *stpt_connHandle,
+static ssize_t st_OnBulkDataWrite(struct bt_conn *stpt_connHandle,
    const struct bt_gatt_attr *stpt_attr, const void *vpt_buf, uint16_t u16_length,
    uint16_t u16_offset, uint8_t u8_flags)
 {
-   return gt_BLK_RxWriteHook(stpt_connHandle, stpt_attr, vpt_buf, u16_length,
+   return gt_BLKS_DataWriteHook(stpt_connHandle, stpt_attr, vpt_buf, u16_length,
       u16_offset, u8_flags);
 }
 
@@ -186,18 +187,18 @@ static ssize_t st_OnBulkRxWrite(struct bt_conn *stpt_connHandle,
 /******************************************************************************/
 /**
  * @public        gstpt_BulkSvc_Init
- * @brief         Publish the capability record and locate the TX value
- *                attribute for BlkCfg_T.stpt_txAttr.
- * @return        TX value attribute (never NULL for this static service).
+ * @brief         Publish the capability record and locate the CTRL value
+ *                attribute for BlkSrvCfg_T.stpt_ctrlAttr.
+ * @return        CTRL value attribute (never NULL for this static service).
  */
 const struct bt_gatt_attr *gstpt_BulkSvc_Init(void)
 {
    BlkCaps_T st_caps;
 
-   gv_BLK_GetCaps(&st_caps);
+   gv_BLKS_GetCaps(&st_caps);
    gv_GATT_LocalWrite(&sst_capsDesc, &st_caps, sizeof(st_caps));
 
    // Returns the value attribute, which notify and the CCC lookup expect
    return bt_gatt_find_by_uuid(gst_bulkXferSvc.attrs, gst_bulkXferSvc.attr_count,
-      BT_UUID_BULK_XFER_TX);
+      BT_UUID_BLK_CTRL);
 }

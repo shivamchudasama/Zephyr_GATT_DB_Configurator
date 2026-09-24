@@ -11,7 +11,9 @@
  * @endcode
  *
  *                This header is intentionally free of Zephyr includes so that
- *                BulkXfer_Frame.c can be unit-tested on any host.
+ *                BulkXfer_Frame.c can be unit-tested on any host. Kconfig
+ *                symbols (CONFIG_*) are still visible: Zephyr injects them
+ *                into every translation unit.
  *
  * @date          22/09/2026
  * @author        Shivam Chudasama
@@ -36,6 +38,28 @@
 /*                                                                            */
 /******************************************************************************/
 /**
+ * @def           BLK_ENABLE_SERVER
+ * @brief         1 builds the Server role (receives bulk data written into this
+ *                device's GATT database).
+ */
+#ifndef BLK_ENABLE_SERVER
+#define BLK_ENABLE_SERVER                    (1)
+#endif // BLK_ENABLE_SERVER
+
+/**
+ * @def           BLK_ENABLE_CLIENT
+ * @brief         1 builds the Client role (sends bulk data by writing into the
+ *                peer's GATT database). Needs CONFIG_BT_GATT_CLIENT.
+ */
+#ifndef BLK_ENABLE_CLIENT
+#if defined(CONFIG_BT_GATT_CLIENT)
+#define BLK_ENABLE_CLIENT                    (1)
+#else
+#define BLK_ENABLE_CLIENT                    (0)
+#endif // CONFIG_BT_GATT_CLIENT
+#endif // BLK_ENABLE_CLIENT
+
+/**
  * @def           BLK_MAX_FRAME_LEN
  * @brief         Largest frame (len + type + payload) the framework will build
  *                or accept, in bytes.
@@ -44,7 +68,7 @@
  *                i.e. exactly one Link Layer packet at ATT_MTU 247. The frame
  *                used on a given link is min(ATT_MTU - 3, BLK_MAX_FRAME_LEN).
  *                Must not exceed 257 (1-byte length field + 2-byte header).
- *                The RX characteristic buffer must be at least this large.
+ *                The DATA characteristic buffer must be at least this large.
  */
 #ifndef BLK_MAX_FRAME_LEN
 #define BLK_MAX_FRAME_LEN                    (244U)
@@ -62,25 +86,46 @@
 
 /**
  * @def           BLK_RX_POOL_DEPTH
- * @brief         Number of received frames that can be queued between the BLE
- *                RX thread (write hook) and the BulkXfer engine thread. Should
- *                be at least BLK_WINDOW_DEFAULT + a few for control frames.
- *                Each entry costs roughly BLK_MAX_FRAME_LEN + 12 bytes of RAM.
+ * @brief         Server: frames that can be queued between the BLE RX thread
+ *                (DATA write hook) and the engine thread. Should be at least
+ *                BLK_WINDOW_DEFAULT + a few. Each entry costs roughly
+ *                BLK_MAX_FRAME_LEN + 12 bytes of RAM.
  */
 #ifndef BLK_RX_POOL_DEPTH
 #define BLK_RX_POOL_DEPTH                    (BLK_WINDOW_DEFAULT + 4U)
 #endif // BLK_RX_POOL_DEPTH
 
 /**
- * @def           BLK_TX_INFLIGHT_MAX
- * @brief         Maximum number of notifications handed to the Bluetooth host
- *                but not yet completed. Keep this below CONFIG_BT_ATT_TX_COUNT
- *                so that the host never blocks on ATT buffer allocation and a
- *                few buffers remain free for other ATT traffic.
+ * @def           BLK_CLI_CTRL_POOL_DEPTH
+ * @brief         Client: CTRL notifications that can be queued between the BLE
+ *                RX thread and the engine thread. Control traffic is about
+ *                one frame per window/2 DATA frames, so a few entries suffice.
+ *                A dropped ACK is covered by the next one; a dropped NACK or
+ *                END by the ACK timeout.
  */
-#ifndef BLK_TX_INFLIGHT_MAX
-#define BLK_TX_INFLIGHT_MAX                  (6U)
-#endif // BLK_TX_INFLIGHT_MAX
+#ifndef BLK_CLI_CTRL_POOL_DEPTH
+#define BLK_CLI_CTRL_POOL_DEPTH              (4U)
+#endif // BLK_CLI_CTRL_POOL_DEPTH
+
+/**
+ * @def           BLK_SRV_NOTIFY_INFLIGHT_MAX
+ * @brief         Server: CTRL notifications (control frames and server -> client
+ *                short messages) handed to the host but not yet completed.
+ */
+#ifndef BLK_SRV_NOTIFY_INFLIGHT_MAX
+#define BLK_SRV_NOTIFY_INFLIGHT_MAX          (2U)
+#endif // BLK_SRV_NOTIFY_INFLIGHT_MAX
+
+/**
+ * @def           BLK_CLI_WRITE_INFLIGHT_MAX
+ * @brief         Client: Write Without Response PDUs handed to the host but not
+ *                yet completed. Together with BLK_SRV_NOTIFY_INFLIGHT_MAX it
+ *                must stay below CONFIG_BT_ATT_TX_COUNT, so the host never
+ *                blocks on ATT buffer allocation.
+ */
+#ifndef BLK_CLI_WRITE_INFLIGHT_MAX
+#define BLK_CLI_WRITE_INFLIGHT_MAX           (6U)
+#endif // BLK_CLI_WRITE_INFLIGHT_MAX
 
 /**
  * @def           BLK_TX_ACK_TIMEOUT_MS
@@ -121,7 +166,7 @@
 
 /**
  * @def           BLK_CTRL_TX_TIMEOUT_MS
- * @brief         Maximum time to wait for a free TX credit when sending a
+ * @brief         Maximum time to wait for a free credit when sending a
  *                control frame (ACK / NACK / END / ABORT).
  */
 #ifndef BLK_CTRL_TX_TIMEOUT_MS
@@ -129,13 +174,13 @@
 #endif // BLK_CTRL_TX_TIMEOUT_MS
 
 /**
- * @def           BLK_NOTIFY_RETRY_MS
- * @brief         Back-off before retrying when the host reports it is
+ * @def           BLK_WRITE_RETRY_MS
+ * @brief         Client: back-off before retrying when the host reports it is
  *                temporarily out of buffers (-ENOMEM / -EAGAIN).
  */
-#ifndef BLK_NOTIFY_RETRY_MS
-#define BLK_NOTIFY_RETRY_MS                  (5U)
-#endif // BLK_NOTIFY_RETRY_MS
+#ifndef BLK_WRITE_RETRY_MS
+#define BLK_WRITE_RETRY_MS                   (5U)
+#endif // BLK_WRITE_RETRY_MS
 
 /**
  * @def           BLK_THREAD_STACK_SIZE
@@ -153,6 +198,10 @@
 #ifndef BLK_THREAD_PRIORITY
 #define BLK_THREAD_PRIORITY                  (5)
 #endif // BLK_THREAD_PRIORITY
+
+#if (BLK_ENABLE_SERVER == 0) && (BLK_ENABLE_CLIENT == 0)
+#error "BulkXfer: enable at least one of BLK_ENABLE_SERVER / BLK_ENABLE_CLIENT"
+#endif
 
 /******************************************************************************/
 /*                                                                            */

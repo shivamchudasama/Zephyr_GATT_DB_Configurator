@@ -1,14 +1,14 @@
 /**
  * @file          BulkXfer_Types.h
- * @brief         Public types of the BLE bulk transfer (BulkXfer) framework:
- *                application callbacks, data source and configuration.
+ * @brief         Types shared by the BulkXfer Server and Client roles:
+ *                application callbacks, data source and capability record.
  *
- *                Threading: every callback in BlkCfg_T runs on the BulkXfer
- *                engine thread (never in BLE stack context), one at a time.
- *                Callbacks may call the BulkXfer API (e.g. start the next
- *                transfer from fpt_onTxDone). Long-running callbacks (a slow
- *                flash write in fpt_onRxData) throttle the link naturally: the
- *                receiver simply ACKs later.
+ *                Threading: every callback in BlkSrvCfg_T / BlkCliCfg_T runs
+ *                on the BulkXfer engine thread (never in BLE stack context),
+ *                one at a time. Callbacks may call the BulkXfer API (e.g.
+ *                start the next transfer from fpt_onTxDone). Long-running
+ *                callbacks (a slow flash write in fpt_onRxData) throttle the
+ *                link naturally: the receiver simply ACKs later.
  *
  * @date          22/09/2026
  * @author        Shivam Chudasama
@@ -36,6 +36,13 @@
 /*                                  DEFINES                                   */
 /*                                                                            */
 /******************************************************************************/
+/**
+ * @def           BLK_PROTOCOL_VERSION
+ * @brief         Protocol version reported in BlkCaps_T. Version 2: the sender
+ *                is the GATT client (writes DATA), the receiver the GATT
+ *                server (notifies CTRL).
+ */
+#define BLK_PROTOCOL_VERSION                 (2U)
 
 /******************************************************************************/
 /*                                                                            */
@@ -123,42 +130,15 @@ typedef void (*BlkRxShort_F)(uint8_t u8_appType, const uint8_t *u8pt_data,
 /**
  * @typedef       BlkTxDone_F
  * @brief         An outgoing transfer finished.
- * @param[in]     u8_appType Application type passed to gi_BLK_Send().
+ * @param[in]     u8_appType Application type passed to gi_BLKC_Send().
  * @param[in]     e_status Result reported by the receiver, or a local error.
  */
 typedef void (*BlkTxDone_F)(uint8_t u8_appType, BlkStatus_E e_status);
 
 /**
- * @struct        BlkCfg_T
- * @brief         Configuration passed to gi_BLK_Init(). Copied internally.
- */
-typedef struct
-{
-   /**
-    * @brief      Value attribute of the TX (notify) characteristic. Find it with
-    *             bt_gatt_find_by_uuid(svc.attrs, svc.attr_count, txUuid).
-    */
-   const struct bt_gatt_attr *stpt_txAttr;
-
-   BlkRxStart_F fpt_onRxStart;               /**< Optional: NULL accepts every transfer. */
-   BlkRxData_F fpt_onRxData;                 /**< Required to receive transfers.         */
-   BlkRxDone_F fpt_onRxDone;                 /**< Optional.                              */
-   BlkRxShort_F fpt_onRxShort;               /**< Optional: NULL drops short messages.   */
-   BlkTxDone_F fpt_onTxDone;                 /**< Optional.                              */
-
-   /**
-    * @brief      When true, gv_BLK_OnConnected() requests 2M PHY and maximum
-    *             data length, and (if this device has a GATT client) starts an
-    *             ATT MTU exchange. Set false if the application manages the
-    *             link parameters itself.
-    */
-   bool b_autoTuneLink;
-} BlkCfg_T;
-
-/**
  * @struct        BlkCaps_T
- * @brief         Capabilities exposed to the central through an optional,
- *                read-only characteristic (served by gt_GATT_GenericRead).
+ * @brief         Capabilities exposed by the Server through the optional,
+ *                read-only Caps characteristic (served by gt_GATT_GenericRead).
  */
 typedef struct __packed
 {
