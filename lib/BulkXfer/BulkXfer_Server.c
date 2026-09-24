@@ -690,8 +690,37 @@ static void sv_SrvMtuExchanged(struct bt_conn *stpt_conn, uint8_t u8_err,
 /******************************************************************************/
 /**
  * @public        gv_BLKS_EnginePre
- * @brief         Engine pass, first half: owed completion, events, then the
- *                queued DATA frames. Called by the core with gst_BLK_lock held.
+ * @brief         Engine pass, first half. Called once per wake-up by the core
+ *                engine thread, with gst_BLK_lock held, before the Client's
+ *                EnginePre and before gv_BLKS_EnginePost().
+ *
+ *                Steps, in order:
+ *                1. Owed completion: if gv_BLKS_OnDisconnected() dropped an
+ *                   active transfer, report it now through fpt_onRxDone with
+ *                   eBS_DISCONNECTED. The disconnect runs in BT context, where
+ *                   application callbacks must not be called.
+ *                2. Events: take and clear each Server event bit. The bit is
+ *                   cleared even without an active session, which discards
+ *                   events left over from a finished transfer.
+ *                   - eBE_SRV_ABORT_REQ (gv_BLKS_AbortRx()): send ABORT and
+ *                     report eBS_ABORTED. Checked first so that an abort wins
+ *                     over an ACK raised in the same pass.
+ *                   - eBE_SRV_ACK_DUE (delayed-ACK timer): send a cumulative
+ *                     ACK.
+ *                   - eBE_SRV_IDLE (inactivity timer): send ABORT and report
+ *                     eBS_TIMEOUT.
+ *                3. Queued frames: drain sst_BLKS_fifo without blocking. A
+ *                   frame whose connection generation differs from
+ *                   st_BLKS_connGen was queued before a disconnect or
+ *                   reconnect; it is dropped. Every other frame is decoded and
+ *                   dispatched (START / DATA / ABORT / short message).
+ *                   Every block goes back to sst_BLKS_slab either way.
+ *
+ *                Application callbacks (fpt_onRxDone, fpt_onRxStart,
+ *                fpt_onRxData, fpt_onRxShort) run from here, on the engine
+ *                thread, with gst_BLK_lock held. Sending a control frame can
+ *                block for up to BLK_CTRL_TX_TIMEOUT_MS while it waits for a
+ *                credit.
  * @return        void
  */
 void gv_BLKS_EnginePre(void)
@@ -748,9 +777,29 @@ void gv_BLKS_EnginePre(void)
 
 /**
  * @public        gv_BLKS_EnginePost
- * @brief         Engine pass, second half: NACK a frame the write hook had to
- *                drop. Runs after the queue was drained so the NACK carries
- *                the current expected seq.
+ * @brief         Engine pass, second half. Called once per wake-up by the core
+ *                engine thread, with gst_BLK_lock held, after both roles'
+ *                EnginePre and before the Client's EnginePost.
+ *
+ *                Handles one event, eBE_SRV_OVERFLOW. gt_BLKS_DataWriteHook()
+ *                raises it when sst_BLKS_slab has no free block, so a written
+ *                frame had to be dropped.
+ *                - The bit is always cleared. A NACK is sent only if a
+ *                  transfer is still active; otherwise the event is stale.
+ *                - The NACK asks the client to go back to u32_nextAbsFrame,
+ *                  with reason eBS_NO_RESOURCES. The client never sees the
+ *                  hook's ATT error (Write Without Response), so this NACK
+ *                  is its only recovery signal.
+ *                - It runs here, not in gv_BLKS_EnginePre(), because the
+ *                  queue has been drained by then. u32_nextAbsFrame then
+ *                  already counts every frame queued before the drop, so
+ *                  the client does not resend frames that were delivered.
+ *                - It is sent even if a gap NACK is already outstanding
+ *                  (b_nackSent is not checked). Afterwards b_nackSent is set,
+ *                  so that gaps caused by the same drop are not NACKed again.
+ *
+ *                Sending the NACK can block for up to BLK_CTRL_TX_TIMEOUT_MS
+ *                while it waits for a credit.
  * @return        void
  */
 void gv_BLKS_EnginePost(void)
@@ -773,10 +822,28 @@ void gv_BLKS_EnginePost(void)
 
 /**
  * @public        gi_BLKS_Init
- * @brief         Store the configuration and start the engine.
+ * @brief         Initialise the Server role. Call once, from thread context,
+ *                before the first connection is reported through
+ *                gv_BLKS_OnConnected().
+ *
+ *                - Copies *stpt_cfg into sst_BLKS_cfg; the caller's struct
+ *                  need not outlive the call. Only stpt_ctrlAttr is
+ *                  mandatory. The callbacks are optional:
+ *                  - fpt_onRxData NULL: every START is refused (eBS_REJECTED).
+ *                  - fpt_onRxStart NULL: every valid START is accepted.
+ *                  - fpt_onRxDone / fpt_onRxShort NULL: not reported.
+ *                - Clears the session and any owed completion.
+ *                - Starts the shared engine thread. This is idempotent, so
+ *                  the Client role may be initialised before or after.
+ *
+ *                The engine reads sst_BLKS_cfg without the lock. This is safe
+ *                because the configuration is written once, before
+ *                sb_BLKS_initialized is set, and there is no de-init.
  * @param[in]     stpt_cfg Configuration (copied). stpt_ctrlAttr is required.
- * @return        0 on success, -EINVAL on bad configuration, -EALREADY if
- *                already initialised.
+ * @return        0 on success.
+ *                -EINVAL if stpt_cfg or stpt_cfg->stpt_ctrlAttr is NULL.
+ *                -EALREADY if the Server is already initialised (the stored
+ *                configuration is left unchanged).
  */
 int gi_BLKS_Init(const BlkSrvCfg_T *stpt_cfg)
 {
@@ -812,7 +879,28 @@ int gi_BLKS_Init(const BlkSrvCfg_T *stpt_cfg)
 /**
  * @public        gv_BLKS_OnConnected
  * @brief         Bind the Server to a new connection. Call from the
- *                application's bt_conn_cb.connected callback (no error).
+ *                application's bt_conn_cb.connected callback, only when the
+ *                connection succeeded (err == 0). Runs in the BT context.
+ *
+ *                - One connection at a time. The call is ignored (with a
+ *                  warning) if gi_BLKS_Init() has not run yet or another
+ *                  connection is already bound. An ignored connection is not
+ *                  bound later: its writes to DATA are dropped silently.
+ *                - Takes its own reference on stpt_conn, released in
+ *                  gv_BLKS_OnDisconnected().
+ *                - Increments st_BLKS_connGen, then publishes the connection
+ *                  to the write hook (st_BLKS_hookConn). In this order, every
+ *                  frame the hook accepts for the new link carries the new
+ *                  generation.
+ *                - If b_autoTuneLink is set, requests 2M PHY and maximum data
+ *                  length (gv_BLK_TuneLink()). With CONFIG_BT_GATT_CLIENT, it
+ *                  also starts an ATT MTU exchange; the result is only
+ *                  logged. Both are done outside gst_BLK_lock because they
+ *                  may block in the BT stack. Their results are not waited
+ *                  for.
+ *
+ *                A transfer can start only after the client has subscribed to
+ *                CTRL notifications. Until then, START frames are ignored.
  * @param[in]     stpt_conn New connection.
  * @return        void
  */
@@ -859,7 +947,28 @@ void gv_BLKS_OnConnected(struct bt_conn *stpt_conn)
 /**
  * @public        gv_BLKS_OnDisconnected
  * @brief         Release the connection and fail a running transfer with
- *                eBS_DISCONNECTED (reported from the engine thread).
+ *                eBS_DISCONNECTED. Normally reached through
+ *                gv_BLK_OnDisconnected(), from the application's
+ *                bt_conn_cb.disconnected callback (BT context).
+ *
+ *                - Ignored if stpt_conn is NULL or is not the bound
+ *                  connection. The caller need not filter.
+ *                - Unpublishes the connection from the write hook and
+ *                  increments st_BLKS_connGen. Frames still queued for the
+ *                  old link are discarded (and freed) by the next
+ *                  gv_BLKS_EnginePre().
+ *                - Clears all Server events and stops both timers, so that
+ *                  nothing left over acts on a later connection.
+ *                - If a transfer was active, marks the session inactive and
+ *                  records the completion in sst_BLKS_pendingDone. The engine
+ *                  thread reports it through fpt_onRxDone(eBS_DISCONNECTED),
+ *                  because callbacks must not run in BT context. No ABORT is
+ *                  sent; the link is gone.
+ *                - Restores the full notification credit budget.
+ *                  sv_SrvNotifyComplete() is never called for notifications
+ *                  lost with the link.
+ *                - Drops the connection reference taken in
+ *                  gv_BLKS_OnConnected() and wakes the engine.
  * @param[in]     stpt_conn Connection that went down.
  * @return        void
  */
@@ -907,15 +1016,36 @@ void gv_BLKS_OnDisconnected(struct bt_conn *stpt_conn)
 /**
  * @public        gi_BLKS_SendShort
  * @brief         Notify a single-frame application message [len][type][data]
- *                on CTRL (no ACK, no retransmission). Can be used while a
- *                transfer is running.
+ *                on CTRL. Synchronous. Thread context only; not ISR-safe.
+ *
+ *                - Best effort: no ACK, no retransmission. 0 means that the
+ *                  host accepted the notification, not that the client
+ *                  received it.
+ *                - Can be used while a transfer is running. It shares the
+ *                  notification credits with the ACK / NACK / END / ABORT
+ *                  frames. A burst of short messages can therefore delay
+ *                  those frames.
+ *                - The connection checks are made under gst_BLK_lock. The
+ *                  credit wait is made without it, holding a connection
+ *                  reference, so the engine keeps running meanwhile. From
+ *                  inside a BulkXfer callback the engine already holds the
+ *                  lock. The engine is then blocked for up to t_timeout, so
+ *                  use K_NO_WAIT there.
+ *                - vpt_data is copied before the call returns.
  * @param[in]     u8_appType Application type (0x00..BLK_APP_TYPE_MAX).
- * @param[in]     vpt_data Payload.
+ * @param[in]     vpt_data Payload. May be NULL only if u8_len is 0.
  * @param[in]     u8_len Payload length (<= gu16_BLKS_GetMaxShortPayload()).
  * @param[in]     t_timeout Maximum wait for a free credit.
- * @return        0 on success, -EPERM, -EINVAL, -ENOTCONN, -EACCES (client
- *                not subscribed to CTRL), -EMSGSIZE, -EAGAIN (no credit in
- *                time) or a bt_gatt_notify_cb() error.
+ * @return        0 on success (notification queued in the host).
+ *                -EPERM if gi_BLKS_Init() has not run.
+ *                -EINVAL if u8_appType > BLK_APP_TYPE_MAX, or vpt_data is
+ *                NULL with u8_len > 0.
+ *                -ENOTCONN if no connection is bound.
+ *                -EACCES if the client is not subscribed to CTRL.
+ *                -EMSGSIZE if the frame does not fit the current ATT MTU.
+ *                -EAGAIN if no credit became free within t_timeout.
+ *                Any other negative value is a bt_gatt_notify_cb() error.
+ *                The credit is returned in that case.
  */
 int gi_BLKS_SendShort(uint8_t u8_appType, const void *vpt_data, uint8_t u8_len,
    k_timeout_t t_timeout)
@@ -985,8 +1115,21 @@ int gi_BLKS_SendShort(uint8_t u8_appType, const void *vpt_data, uint8_t u8_len,
 
 /**
  * @public        gv_BLKS_AbortRx
- * @brief         Request cancellation of the incoming transfer. Completion is
- *                reported through fpt_onRxDone with eBS_ABORTED.
+ * @brief         Request cancellation of the incoming transfer. Asynchronous;
+ *                safe from any context, including ISRs and BulkXfer
+ *                callbacks (it only sets an event bit and wakes the engine).
+ *
+ *                The engine acts on the request in its next
+ *                gv_BLKS_EnginePre(). It sends ABORT(eBAD_BY_RECEIVER) to the
+ *                client and reports fpt_onRxDone(eBS_ABORTED).
+ *
+ *                The request applies to whatever transfer is active when the
+ *                engine handles it. It has no effect in these cases:
+ *                - No transfer is active at that time.
+ *                - The transfer ends first (completed, timed out or
+ *                  disconnected). fpt_onRxDone then reports that result
+ *                  instead.
+ *                A request is never kept for a later transfer.
  * @return        void
  */
 void gv_BLKS_AbortRx(void)
@@ -997,8 +1140,18 @@ void gv_BLKS_AbortRx(void)
 
 /**
  * @public        gb_BLKS_IsRxBusy
- * @brief         Whether an incoming transfer is in progress.
- * @return        true between an accepted START and fpt_onRxDone.
+ * @brief         Whether an incoming transfer is in progress. Takes
+ *                gst_BLK_lock, so thread context only (not ISR-safe). May be
+ *                called from BulkXfer callbacks (the lock is recursive).
+ *
+ *                The value is a snapshot and can change right after the
+ *                call. The flag is cleared before fpt_onRxDone runs, so:
+ *                - Inside fpt_onRxDone it already returns false.
+ *                - After a disconnect it returns false immediately, even
+ *                  though fpt_onRxDone(eBS_DISCONNECTED) is delivered later
+ *                  by the engine.
+ * @return        true from the accepted START until the transfer ends,
+ *                false otherwise.
  */
 bool gb_BLKS_IsRxBusy(void)
 {
@@ -1014,8 +1167,15 @@ bool gb_BLKS_IsRxBusy(void)
 /**
  * @public        gu16_BLKS_GetMaxShortPayload
  * @brief         Largest payload gi_BLKS_SendShort() accepts on the current
- *                link (depends on the negotiated ATT MTU).
- * @return        Payload size in bytes, or 0 without a connection.
+ *                link. Takes gst_BLK_lock, so thread context only (not
+ *                ISR-safe).
+ *
+ *                Computed as min(ATT_MTU - 3, BLK_MAX_FRAME_LEN) minus the
+ *                2-byte frame header. The ATT MTU is often 23 until the MTU
+ *                exchange completes. Query again after the exchange, and do
+ *                not cache the value across connections.
+ * @return        Payload size in bytes (at most BLK_MAX_SHORT_PAYLOAD).
+ *                0 if no connection is bound.
  */
 uint16_t gu16_BLKS_GetMaxShortPayload(void)
 {
@@ -1038,8 +1198,19 @@ uint16_t gu16_BLKS_GetMaxShortPayload(void)
 /**
  * @public        gv_BLKS_GetCaps
  * @brief         Fill the capability record served by the optional Caps
- *                characteristic.
- * @param[out]    stpt_caps Destination.
+ *                characteristic. Call it from that characteristic's read
+ *                handler. Uses compile-time values only, so it needs no
+ *                lock and no gi_BLKS_Init(), and is safe from any context.
+ *
+ *                - u8_protocolVersion: BLK_PROTOCOL_VERSION, so that a client
+ *                  can check wire compatibility before it sends START.
+ *                - u8_maxFrameLen: BLK_MAX_FRAME_LEN, capped at 255 to fit
+ *                  the field. The usable size on a link is further limited
+ *                  by the ATT MTU.
+ *                - u8_window: BLK_WINDOW_DEFAULT. This is the largest window
+ *                  the Server grants; a larger START window is reduced to it.
+ *                - u8_reserved: 0.
+ * @param[out]    stpt_caps Destination. Must not be NULL (asserted).
  * @return        void
  */
 void gv_BLKS_GetCaps(BlkCaps_T *stpt_caps)
@@ -1063,13 +1234,43 @@ void gv_BLKS_GetCaps(BlkCaps_T *stpt_caps)
  *                taken from vpt_buf / u16_length, which always hold exactly
  *                the bytes of this write.
  *
+ *                The hook only validates and queues the frame; it does not
+ *                decode it. Checks, in order:
+ *                1. Prepare (long) writes and non-zero offsets are refused.
+ *                2. Writes from any connection other than the bound one,
+ *                   or before gi_BLKS_Init(), are ignored silently. The
+ *                   connection is compared lock-free with st_BLKS_hookConn
+ *                   and is never dereferenced.
+ *                3. The length must match the frame's len byte and must not
+ *                   exceed BLK_MAX_FRAME_LEN (gb_BLK_FrameLenValid()).
+ *                4. A block from sst_BLKS_slab is needed. If none is free, the
+ *                   frame is dropped and eBE_SRV_OVERFLOW is raised, so that
+ *                   gv_BLKS_EnginePost() NACKs it.
+ *                A frame that passes is copied into the block, tagged with
+ *                the current st_BLKS_connGen, put into sst_BLKS_fifo, and the
+ *                engine is woken.
+ *
+ *                The client normally uses Write Without Response, so it never
+ *                sees the ATT errors below. They only matter for Write
+ *                Requests. For DATA frames, recovery relies on NACK and on
+ *                the client's ACK timeout.
+ *
  * @param[in]     stpt_connHandle Connection that wrote.
  * @param[in]     stpt_attr DATA attribute (unused).
  * @param[in]     vpt_buf Written bytes (one frame).
  * @param[in]     u16_length Number of bytes.
  * @param[in]     u16_offset Must be 0 (long writes are not supported).
  * @param[in]     u8_flags Write flags; prepare writes are refused.
- * @return        0 to keep the generic return value, or BT_GATT_ERR().
+ * @return        0 if the frame was queued, or ignored (not initialised /
+ *                not the bound connection); the generic return value is
+ *                kept.
+ *                BT_GATT_ERR(BT_ATT_ERR_WRITE_NOT_PERMITTED) for a prepare
+ *                write.
+ *                BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET) if u16_offset != 0.
+ *                BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN) if the length
+ *                does not match the len byte.
+ *                BT_GATT_ERR(BT_ATT_ERR_INSUFFICIENT_RESOURCES) if the RX
+ *                queue is full.
  */
 ssize_t gt_BLKS_DataWriteHook(struct bt_conn *stpt_connHandle,
    const struct bt_gatt_attr *stpt_attr, const void *vpt_buf, uint16_t u16_length,

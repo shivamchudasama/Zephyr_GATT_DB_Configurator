@@ -1163,9 +1163,46 @@ static int si_RamSourceRead(void *vpt_ctx, uint32_t u32_offset, uint8_t *u8pt_bu
 /******************************************************************************/
 /**
  * @public        gv_BLKC_EnginePre
- * @brief         Engine pass, first half: owed callbacks, attach result,
- *                events, then the queued CTRL frames. Called by the core with
- *                gst_BLK_lock held.
+ * @brief         Engine pass, first half. Called once per wake-up by the core
+ *                engine thread, with gst_BLK_lock held, after the Server's
+ *                EnginePre and before either role's EnginePost.
+ *
+ *                Steps, in order:
+ *                1. Owed completions recorded by gv_BLKC_OnDisconnected(),
+ *                   which runs in BT context where callbacks must not be
+ *                   called:
+ *                   - A dropped transfer: fpt_onTxDone(eBS_DISCONNECTED).
+ *                   - A cut-short attach: fpt_onReady(conn, -ENOTCONN). The
+ *                     connection reference kept for it is released after
+ *                     the callback.
+ *                2. Attach result (eBE_CLI_ATTACH_DONE), posted lock-free by
+ *                   the discovery / subscription callbacks. It is ignored if
+ *                   the Client is no longer attaching or st_BLKC_connGen has
+ *                   moved on (stale). Otherwise success moves the Client to
+ *                   eBCS_READY and failure releases the binding; fpt_onReady
+ *                   reports either result.
+ *                3. Events: each bit is taken and cleared even without a
+ *                   running transfer, which discards stale events.
+ *                   - eBE_CLI_ABORT_REQ (gv_BLKC_AbortTx()): report
+ *                     eBS_ABORTED. ABORT(eBAD_BY_SENDER) is sent only if START
+ *                     has already gone out. Checked first, so a timeout in the
+ *                     same pass does not retransmit a cancelled transfer.
+ *                   - eBE_CLI_TIMEOUT (ACK timer): resend START, or go back to
+ *                     the first unacknowledged frame (Go-Back-N). After
+ *                     BLK_TX_MAX_RETRIES consecutive timeouts, send ABORT and
+ *                     report eBS_TIMEOUT.
+ *                   - eBE_CLI_RETRY (host buffer back-off): only wakes the
+ *                     engine; gv_BLKC_EnginePost() retries the write.
+ *                4. Queued CTRL notifications: drain sst_BLKC_fifo without
+ *                   blocking. Frames from an older connection generation are
+ *                   dropped. The rest are dispatched: short messages to
+ *                   fpt_onRxShort; ACK, NACK, END and receiver ABORT to the TX
+ *                   state machine. Every block goes back to sst_BLKC_slab.
+ *
+ *                Application callbacks (fpt_onReady, fpt_onTxDone,
+ *                fpt_onRxShort) run from here, on the engine thread, with
+ *                gst_BLK_lock held. Sending ABORT can block for up to
+ *                BLK_CTRL_TX_TIMEOUT_MS while it waits for a credit.
  * @return        void
  */
 void gv_BLKC_EnginePre(void)
@@ -1240,8 +1277,31 @@ void gv_BLKC_EnginePre(void)
 
 /**
  * @public        gv_BLKC_EnginePost
- * @brief         Engine pass, second half: pump the outgoing transfer, using
- *                window space freed by the ACKs just processed.
+ * @brief         Engine pass, second half. Called once per wake-up by the core
+ *                engine thread, with gst_BLK_lock held, last in the pass
+ *                (after the Server's EnginePost).
+ *
+ *                Pumps the outgoing transfer. Running after
+ *                gv_BLKC_EnginePre() means it uses the window space freed by
+ *                the ACKs just processed. Does nothing unless the Client is
+ *                eBCS_READY.
+ *                - eBTS_START_PENDING: write START and arm the ACK timer. The
+ *                  transfer waits in eBTS_START_SENT for ACK(seq 0), which
+ *                  also sets the negotiated window.
+ *                - eBTS_SENDING: write DATA frames while frames remain, fewer
+ *                  than the window are unacknowledged, and a credit is free.
+ *                  Each chunk is read from the source (fpt_read, on this
+ *                  thread) straight into the frame buffer.
+ *
+ *                Never blocks. When it stops for lack of credits, the write
+ *                completion of an earlier frame wakes the engine again. On
+ *                -ENOMEM / -EAGAIN from the host, it arms the retry timer
+ *                (BLK_WRITE_RETRY_MS) instead, since no completion may be
+ *                pending. Other failures end the transfer through
+ *                fpt_onTxDone:
+ *                - Source read error: eBS_SOURCE_ERROR, ABORT sent.
+ *                - Write error: eBS_DISCONNECTED for -ENOTCONN, otherwise
+ *                  eBS_PROTOCOL_ERROR. No ABORT is sent.
  * @return        void
  */
 void gv_BLKC_EnginePost(void)
@@ -1251,11 +1311,28 @@ void gv_BLKC_EnginePost(void)
 
 /**
  * @public        gi_BLKC_Init
- * @brief         Store the configuration and start the engine.
- * @param[in]     stpt_cfg Configuration (copied). NULL UUIDs select the
- *                BulkXfer_Uuid.h defaults.
- * @return        0 on success, -EINVAL if stpt_cfg is NULL, -EALREADY if
- *                already initialised.
+ * @brief         Initialise the Client role. Call once, from thread context,
+ *                before the first gi_BLKC_Attach().
+ *
+ *                - Copies *stpt_cfg into sst_BLKC_cfg; the caller's struct
+ *                  need not outlive the call. Custom UUIDs are stored by
+ *                  pointer and must stay valid for the program's lifetime.
+ *                  NULL UUIDs select the BulkXfer_Uuid.h defaults.
+ *                - All callbacks are optional. A NULL callback is simply not
+ *                  called.
+ *                - Clears the session and any owed completion.
+ *                - Starts the shared engine thread. This is idempotent, so
+ *                  the Server role may be initialised before or after.
+ *
+ *                The engine and BT callbacks read sst_BLKC_cfg without the
+ *                lock. This is safe because the configuration is written
+ *                once, before sb_BLKC_initialized is set, and there is no
+ *                de-init.
+ * @param[in]     stpt_cfg Configuration (copied).
+ * @return        0 on success.
+ *                -EINVAL if stpt_cfg is NULL.
+ *                -EALREADY if the Client is already initialised (the stored
+ *                configuration is left unchanged).
  */
 int gi_BLKC_Init(const BlkCliCfg_T *stpt_cfg)
 {
@@ -1299,14 +1376,48 @@ int gi_BLKC_Init(const BlkCliCfg_T *stpt_cfg)
 /**
  * @public        gi_BLKC_Attach
  * @brief         Bind the Client to a connection and start the attach
- *                sequence (asynchronous): optional link tuning and MTU
- *                exchange, discovery of DATA / CTRL, CTRL subscription. The
- *                result is reported through fpt_onReady on the engine thread.
- * @param[in]     stpt_conn Connection (either link role).
- * @return        0 attach started; -EPERM not initialised; -EINVAL NULL
- *                connection; -EALREADY this connection is already attached or
- *                attaching; -EBUSY another connection is bound; other
- *                negative errno from bt_gatt_discover().
+ *                sequence. Asynchronous. Thread context only; not ISR-safe.
+ *                Works in either link role (central or peripheral).
+ *
+ *                - One connection at a time. Takes its own reference on
+ *                  stpt_conn, released at disconnect or when the attach
+ *                  fails.
+ *                - Increments st_BLKC_connGen, then publishes the connection
+ *                  to the BT callbacks (st_BLKC_hookConn). In this order,
+ *                  every CTRL notification accepted for the new link carries
+ *                  the new generation.
+ *                - If b_autoTuneLink is set, requests 2M PHY and maximum data
+ *                  length (gv_BLK_TuneLink()) and starts an ATT MTU exchange.
+ *                  Discovery then starts from the exchange callback, whatever
+ *                  its result. If the exchange cannot start (e.g. already
+ *                  done), discovery starts directly. These stack calls may
+ *                  block and are made without gst_BLK_lock.
+ *                - Attach sequence, one step per BT callback: primary
+ *                  service -> DATA (Write Without Response) and CTRL (Notify)
+ *                  characteristics -> CCC of CTRL -> subscribe.
+ *
+ *                The result arrives through fpt_onReady on the engine thread:
+ *                0 when ready; -ENOENT if the service, a characteristic or the
+ *                CCC is missing; -EIO if the subscription failed; -ENOTCONN if
+ *                the link dropped first; another negative errno if a later
+ *                discovery step failed to start. On failure the binding is
+ *                released, so the call can be retried.
+ *
+ *                If this function itself returns an error, fpt_onReady is not
+ *                called.
+ *
+ *                The chunk size of a transfer follows the ATT MTU at
+ *                gi_BLKC_Send() time. Without b_autoTuneLink, the application
+ *                is responsible for the MTU exchange.
+ * @param[in]     stpt_conn Connection to bind.
+ * @return        0 if the attach sequence started.
+ *                -EPERM if gi_BLKC_Init() has not run.
+ *                -EINVAL if stpt_conn is NULL.
+ *                -EALREADY if this connection is already attached or
+ *                attaching.
+ *                -EBUSY if another connection is bound.
+ *                Any other negative value is a bt_gatt_discover() error; the
+ *                binding is undone.
  */
 int gi_BLKC_Attach(struct bt_conn *stpt_conn)
 {
@@ -1384,9 +1495,28 @@ int gi_BLKC_Attach(struct bt_conn *stpt_conn)
 
 /**
  * @public        gv_BLKC_OnDisconnected
- * @brief         Release the connection and fail a running transfer with
- *                eBS_DISCONNECTED, or an attach in progress with -ENOTCONN
- *                (both reported from the engine thread).
+ * @brief         Release the connection and fail whatever was in progress.
+ *                Normally reached through gv_BLK_OnDisconnected(), from the
+ *                application's bt_conn_cb.disconnected callback (BT context).
+ *
+ *                - Ignored if stpt_conn is NULL or is not the bound
+ *                  connection. The caller need not filter.
+ *                - If a transfer was running, marks it idle and records the
+ *                  completion. The engine reports it through
+ *                  fpt_onTxDone(eBS_DISCONNECTED), because callbacks must not
+ *                  run in BT context. No ABORT is sent; the link is gone.
+ *                - If an attach was in progress, the connection reference
+ *                  moves to the owed fpt_onReady(conn, -ENOTCONN). The engine
+ *                  releases it after the callback. Otherwise the reference
+ *                  is released here.
+ *                - Unbinds the connection: unpublishes it from the BT
+ *                  callbacks and increments st_BLKC_connGen, so queued CTRL
+ *                  frames and a late attach result for the old link are
+ *                  discarded. Also clears the Client events, stops both
+ *                  timers and restores the full credit budget
+ *                  (sv_CliWriteComplete() is never called for writes lost
+ *                  with the link).
+ *                - Wakes the engine to deliver the owed callbacks.
  * @param[in]     stpt_conn Connection that went down.
  * @return        void
  */
@@ -1429,19 +1559,51 @@ void gv_BLKC_OnDisconnected(struct bt_conn *stpt_conn)
 
 /**
  * @public        gi_BLKC_Send
- * @brief         Start an asynchronous multi-frame transfer to the server.
+ * @brief         Start a multi-frame transfer to the server. Asynchronous.
+ *                Thread context only; not ISR-safe.
  *
- *                The CRC-32 of the whole object is computed here, in the
- *                caller's thread, by reading the source once. The source must
- *                then stay readable and unchanged until fpt_onTxDone.
+ *                1. CRC pre-pass: the whole object is read once, in
+ *                   BLK_CRC_READ_CHUNK pieces, in the caller's thread and
+ *                   without gst_BLK_lock, so the engine keeps running. Called
+ *                   from a BulkXfer callback (e.g. fpt_onTxDone), the pass
+ *                   blocks the engine for its whole duration.
+ *                2. Under the lock: check the link and that no transfer is
+ *                   running, then set up the session and wake the engine,
+ *                   which sends START.
+ *                   - xferId: next value of a wrapping counter; it only has to
+ *                     differ from the previous transfer.
+ *                   - Chunk size: ATT frame capacity minus the DATA header,
+ *                     fixed for the whole transfer even if the MTU grows.
+ *                   - Window: BLK_WINDOW_DEFAULT, reduced to the receiver's
+ *                     value when it acknowledges START.
+ *
+ *                The source is read again, on the engine thread, for sending
+ *                and for every retransmission. It must stay readable and
+ *                return the same bytes until fpt_onTxDone; otherwise the
+ *                receiver reports eBS_CRC_ERROR. *stpt_source is copied, the
+ *                context it points to is not.
+ *
+ *                fpt_onTxDone reports the result: the status carried by the
+ *                receiver's END (eBS_OK on success), or eBS_REJECTED,
+ *                eBS_REMOTE_ABORTED, eBS_ABORTED, eBS_TIMEOUT,
+ *                eBS_SOURCE_ERROR, eBS_DISCONNECTED or eBS_PROTOCOL_ERROR.
+ *                The session is idle before the callback runs, so the next
+ *                transfer may be started from it.
  *
  * @param[in]     u8_appType Application type (0x00..BLK_APP_TYPE_MAX).
  * @param[in]     stpt_source Data source (copied).
- * @param[in]     u32_totalLen Object size in bytes (0 is allowed).
- * @return        0 if the transfer was queued, otherwise:
- *                -EPERM not initialised, -EINVAL bad argument, -EIO source
- *                failed, -ENOTCONN not attached, -EAGAIN attach not finished,
- *                -EBUSY a transfer is running, -EMSGSIZE MTU too small.
+ * @param[in]     u32_totalLen Object size in bytes. 0 is allowed: START is
+ *                followed directly by the receiver's END.
+ * @return        0 if the transfer was queued (fpt_onTxDone follows).
+ *                -EPERM if gi_BLKC_Init() has not run.
+ *                -EINVAL if stpt_source or its fpt_read is NULL, or
+ *                u8_appType > BLK_APP_TYPE_MAX.
+ *                -EIO if the source failed during the CRC pre-pass.
+ *                -ENOTCONN if no connection is bound.
+ *                -EAGAIN if the attach has not finished.
+ *                -EBUSY if a transfer is already running.
+ *                -EMSGSIZE if the ATT MTU leaves no room for a data byte.
+ *                No callback follows an error return.
  */
 int gi_BLKC_Send(uint8_t u8_appType, const BlkSource_T *stpt_source,
    uint32_t u32_totalLen)
@@ -1547,12 +1709,18 @@ int gi_BLKC_Send(uint8_t u8_appType, const BlkSource_T *stpt_source,
 
 /**
  * @public        gi_BLKC_SendBuffer
- * @brief         gi_BLKC_Send() for an object held in RAM. The buffer must
- *                stay valid and unchanged until fpt_onTxDone.
+ * @brief         gi_BLKC_Send() for an object held in RAM. Asynchronous.
+ *                Thread context only; not ISR-safe.
+ *
+ *                Wraps vpt_data in a built-in source that memcpy()s from it.
+ *                The buffer is not copied: it is read during the CRC pass and
+ *                again on the engine thread for every (re)transmission, so it
+ *                must stay valid and unchanged until fpt_onTxDone.
  * @param[in]     u8_appType Application type (0x00..BLK_APP_TYPE_MAX).
- * @param[in]     vpt_data Object.
+ * @param[in]     vpt_data Object. May be NULL only if u32_totalLen is 0.
  * @param[in]     u32_totalLen Object size in bytes.
- * @return        See gi_BLKC_Send().
+ * @return        -EINVAL if vpt_data is NULL with u32_totalLen > 0.
+ *                Otherwise as gi_BLKC_Send() (-EIO cannot occur).
  */
 int gi_BLKC_SendBuffer(uint8_t u8_appType, const void *vpt_data, uint32_t u32_totalLen)
 {
@@ -1573,15 +1741,38 @@ int gi_BLKC_SendBuffer(uint8_t u8_appType, const void *vpt_data, uint32_t u32_to
 /**
  * @public        gi_BLKC_SendShort
  * @brief         Write a single-frame application message [len][type][data]
- *                to DATA immediately (no ACK, no retransmission). Can be used
- *                while a multi-frame transfer is running.
+ *                to DATA (Write Without Response). Synchronous. Thread
+ *                context only; not ISR-safe.
+ *
+ *                - Best effort: no ACK, no retransmission. 0 means that the
+ *                  host accepted the write, not that the server received it.
+ *                  The server delivers it through its fpt_onRxShort.
+ *                - Can be used while a transfer is running. It shares the
+ *                  write credits with the DATA frames, so during a transfer
+ *                  it may have to wait for one, and it slows the transfer
+ *                  down.
+ *                - The connection checks are made under gst_BLK_lock. The
+ *                  credit wait is made without it, holding a connection
+ *                  reference, so the engine keeps running meanwhile. From
+ *                  inside a BulkXfer callback the engine already holds the
+ *                  lock. The engine is then blocked for up to t_timeout, so
+ *                  use K_NO_WAIT there.
+ *                - vpt_data is copied before the call returns.
  * @param[in]     u8_appType Application type (0x00..BLK_APP_TYPE_MAX).
- * @param[in]     vpt_data Payload.
+ * @param[in]     vpt_data Payload. May be NULL only if u8_len is 0.
  * @param[in]     u8_len Payload length (<= gu16_BLKC_GetMaxShortPayload()).
  * @param[in]     t_timeout Maximum wait for a free credit.
- * @return        0 on success, -EPERM, -EINVAL, -ENOTCONN, -EAGAIN (attach
- *                not finished, or no credit in time), -EMSGSIZE or a
- *                bt_gatt_write_without_response_cb() error.
+ * @return        0 on success (write queued in the host).
+ *                -EPERM if gi_BLKC_Init() has not run.
+ *                -EINVAL if u8_appType > BLK_APP_TYPE_MAX, or vpt_data is
+ *                NULL with u8_len > 0.
+ *                -ENOTCONN if no connection is bound.
+ *                -EAGAIN if the attach has not finished, or no credit became
+ *                free within t_timeout.
+ *                -EMSGSIZE if the frame does not fit the current ATT MTU.
+ *                Any other negative value is a
+ *                bt_gatt_write_without_response_cb() error. The credit is
+ *                returned in that case.
  */
 int gi_BLKC_SendShort(uint8_t u8_appType, const void *vpt_data, uint8_t u8_len,
    k_timeout_t t_timeout)
@@ -1651,8 +1842,23 @@ int gi_BLKC_SendShort(uint8_t u8_appType, const void *vpt_data, uint8_t u8_len,
 
 /**
  * @public        gv_BLKC_AbortTx
- * @brief         Request cancellation of the outgoing transfer. Completion is
- *                reported through fpt_onTxDone with eBS_ABORTED.
+ * @brief         Request cancellation of the outgoing transfer. Asynchronous;
+ *                safe from any context, including ISRs and BulkXfer
+ *                callbacks (it only sets an event bit and wakes the engine).
+ *
+ *                The engine acts on the request in its next
+ *                gv_BLKC_EnginePre() and reports fpt_onTxDone(eBS_ABORTED).
+ *                ABORT(eBAD_BY_SENDER) is sent to the server only if START
+ *                has already gone out; before that the server knows nothing
+ *                of the transfer.
+ *
+ *                The request applies to whatever transfer is running when the
+ *                engine handles it. This includes one started by
+ *                gi_BLKC_Send() after this call but before that pass. It has
+ *                no effect in these cases:
+ *                - No transfer is running at that time.
+ *                - The transfer ends first (END, timeout, disconnect).
+ *                  fpt_onTxDone then reports that result instead.
  * @return        void
  */
 void gv_BLKC_AbortTx(void)
@@ -1666,7 +1872,16 @@ void gv_BLKC_AbortTx(void)
 /**
  * @public        gb_BLKC_IsReady
  * @brief         Whether the attach finished and transfers may be started.
- * @return        true once fpt_onReady reported 0, until the disconnect.
+ *                Takes gst_BLK_lock, so thread context only (not ISR-safe).
+ *                May be called from BulkXfer callbacks (the lock is
+ *                recursive).
+ *
+ *                The value is a snapshot. The state is set before fpt_onReady
+ *                runs, so it already returns true inside fpt_onReady(conn,
+ *                0). It returns false as soon as gv_BLKC_OnDisconnected() has
+ *                run, before any owed callback is delivered.
+ * @return        true from a successful attach until the disconnect, false
+ *                otherwise (including while the attach is running).
  */
 bool gb_BLKC_IsReady(void)
 {
@@ -1681,8 +1896,19 @@ bool gb_BLKC_IsReady(void)
 
 /**
  * @public        gb_BLKC_IsTxBusy
- * @brief         Whether an outgoing transfer is in progress.
- * @return        true while gi_BLKC_Send() would return -EBUSY.
+ * @brief         Whether an outgoing transfer is in progress. Takes
+ *                gst_BLK_lock, so thread context only (not ISR-safe). May be
+ *                called from BulkXfer callbacks (the lock is recursive).
+ *
+ *                The value is a snapshot and can change right after the
+ *                call. The session is set idle before fpt_onTxDone runs, so:
+ *                - Inside fpt_onTxDone it already returns false.
+ *                - After a disconnect it returns false immediately, even
+ *                  though fpt_onTxDone(eBS_DISCONNECTED) is delivered later
+ *                  by the engine.
+ * @return        true from a successful gi_BLKC_Send() until the transfer
+ *                ends (while gi_BLKC_Send() would return -EBUSY), false
+ *                otherwise.
  */
 bool gb_BLKC_IsTxBusy(void)
 {
@@ -1698,8 +1924,15 @@ bool gb_BLKC_IsTxBusy(void)
 /**
  * @public        gu16_BLKC_GetMaxShortPayload
  * @brief         Largest payload gi_BLKC_SendShort() accepts on the current
- *                link (depends on the negotiated ATT MTU).
- * @return        Payload size in bytes, or 0 unless ready.
+ *                link. Takes gst_BLK_lock, so thread context only (not
+ *                ISR-safe).
+ *
+ *                Computed as min(ATT_MTU - 3, BLK_MAX_FRAME_LEN) minus the
+ *                2-byte frame header. Without b_autoTuneLink the ATT MTU may
+ *                still be 23 when the attach completes. Query again after an
+ *                MTU exchange, and do not cache the value across connections.
+ * @return        Payload size in bytes (at most BLK_MAX_SHORT_PAYLOAD).
+ *                0 unless the Client is attached and ready.
  */
 uint16_t gu16_BLKC_GetMaxShortPayload(void)
 {

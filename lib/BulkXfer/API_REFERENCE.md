@@ -193,7 +193,7 @@ The client receives ABORT (by receiver), and the local result is `eBS_ABORTED` t
 
 | Function | Returns |
 |---|---|
-| `bool gb_BLKS_IsRxBusy(void)` | `true` between an accepted START and `fpt_onRxDone` |
+| `bool gb_BLKS_IsRxBusy(void)` | `true` from an accepted START until the transfer ends. Already `false` inside `fpt_onRxDone`, and immediately after a disconnect (before the deferred `fpt_onRxDone(eBS_DISCONNECTED)`) |
 | `uint16_t gu16_BLKS_GetMaxShortPayload(void)` | Largest `gi_BLKS_SendShort()` payload on the current link; `0` with no connection |
 | `void gv_BLKS_GetCaps(BlkCaps_T *stpt_caps)` | Fills the Caps record (asserts `stpt_caps != NULL`) |
 
