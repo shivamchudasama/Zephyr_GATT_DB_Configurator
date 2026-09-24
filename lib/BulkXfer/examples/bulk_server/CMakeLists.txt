@@ -12,6 +12,7 @@ target_sources(app PRIVATE
 
 target_include_directories(app PRIVATE
    src
+   ${CMAKE_CURRENT_LIST_DIR}/..
    ${CMAKE_CURRENT_LIST_DIR}/../../../AppLog
 )
 

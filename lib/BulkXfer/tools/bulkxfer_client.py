@@ -30,9 +30,9 @@ import zlib
 
 from bleak import BleakClient, BleakScanner
 
-DATA_UUID = "b1c00002-2f5b-4e6a-9c1d-7a3e5f8b0c21"   # client -> server (write w/o response)
-CTRL_UUID = "b1c00003-2f5b-4e6a-9c1d-7a3e5f8b0c21"   # server -> client (notify)
-CAPS_UUID = "b1c00004-2f5b-4e6a-9c1d-7a3e5f8b0c21"
+DATA_UUID = "b1c00001-dbb1-4d99-ab6e-f441ec7c092b"   # client -> server (write w/o response)
+CTRL_UUID = "b1c00002-dbb1-4d99-ab6e-f441ec7c092b"   # server -> client (notify)
+CAPS_UUID = "b1c00003-dbb1-4d99-ab6e-f441ec7c092b"
 
 T_START, T_DATA, T_ACK, T_NACK, T_END, T_ABORT = 0xF0, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5
 ABORT_BY_SENDER, ABORT_BY_RECEIVER = 0, 1

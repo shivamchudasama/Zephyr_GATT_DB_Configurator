@@ -12,7 +12,7 @@
  *                Build it three ways to prove each role builds alone:
  *
  * @code
- *                gcc -std=gnu99 -Wall -Wextra -Werror -Ishim -I.. \
+ *                gcc -std=gnu99 -Wall -Wextra -Werror -Ishim -I.. -I../examples \
  *                    -Wno-missing-field-initializers -DCONFIG_BT_GATT_CLIENT \
  *                    -DBLK_RX_POOL_DEPTH=6 -o test_engine \
  *                    test_engine.c ../BulkXfer_Frame.c && ./test_engine
